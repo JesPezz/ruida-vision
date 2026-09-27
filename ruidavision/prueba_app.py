@@ -106,6 +106,41 @@ def main():
     app.update()
     chk("avisa si faltan puntos", "4 puntos" in app.lbl_cal.cget("text"))
 
+    # FOV: la distancia real se PREGUNTA en un dialogo. Antes se releia de la
+    # casilla de al lado, que ya tenia el FOV guardado, y por eso la medida no
+    # cuadraba y la segunda vez se comia a si misma. Se falsea save_cfg para no
+    # tocar el calib.json de verdad.
+    guardado = {}
+    save_real, load_real = A.hv.save_cfg, A.hv.load_cfg
+    ask_real = A.simpledialog.askstring
+    A.hv.save_cfg = lambda c: guardado.update(c)
+    A.hv.load_cfg = lambda: dict(app.cfg)
+    try:
+        app.foto.poner(np.zeros((480, 640, 3), "uint8"), [])   # foto fija de 640 px
+        w = int(app.foto.foto.shape[1])
+        app.fovpts = [(100.0, 100.0), (200.0, 100.0)]      # 100 px de lado
+        A.simpledialog.askstring = lambda *a, **k: "40"    # 100 px = 40 mm
+        app._fov()
+        chk("el FOV se calcula con la distancia preguntada",
+            abs(app.cfg["head_fov_mm"] - 0.4 * w) < 1e-6)
+
+        antes = app.cfg["head_fov_mm"]
+        A.simpledialog.askstring = lambda *a, **k: None        # cancelado
+        app._fov()
+        chk("cancelar la distancia deja el FOV como estaba",
+            app.cfg["head_fov_mm"] == antes)
+
+        app.campos["head_fov_mm"].delete(0, "end")
+        app.campos["head_fov_mm"].insert(0, "31,5")
+        app.guardar_cfg()
+        chk("Ajustes guarda el FOV como numero y no como texto",
+            isinstance(guardado.get("head_fov_mm"), float)
+            and abs(guardado["head_fov_mm"] - 31.5) < 1e-9)
+    finally:
+        A.hv.save_cfg, A.hv.load_cfg = save_real, load_real
+        A.simpledialog.askstring = ask_real
+    app.cfg = load_real()
+
     # Jog: un toque corto da UN paso fino (hold), mantener pasa a continuo
     # (jog_hold) y al soltar se para. Se falsea el panel (para no abrir el
     # socket) y se vuelve sincrono el hilo de trabajo: lo que se prueba es la

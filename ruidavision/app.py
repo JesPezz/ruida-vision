@@ -24,7 +24,7 @@ import sys
 import threading
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 
 import cv2
 import numpy as np
@@ -598,12 +598,10 @@ class App(tk.Tk):
             ttk.Button(b, text=txt, command=cmd).pack(side="left", padx=3)
         ttk.Label(b, text="  el clic en la foto guarda el punto solo",
                   style="Chico.TLabel").pack(side="left", padx=8)
-        ttk.Label(b, text="  FOV cabezal:", style="Chico.TLabel").pack(side="left", padx=(20, 3))
-        ttk.Button(b, text="medir", command=self.fov_foto).pack(side="left")
-        self.ent_fov = ttk.Entry(b, width=9)
-        self.ent_fov.insert(0, "%.2f" % self.cfg["head_fov_mm"])
-        self.ent_fov.pack(side="left", padx=4)
-        ttk.Label(b, text="mm (lo que miden los dos clics)", style="Chico.TLabel").pack(side="left")
+        ttk.Button(b, text="Medir FOV", command=self.fov_foto).pack(side="left")
+        self.lbl_fov = ttk.Label(b, text="", style="Chico.TLabel")
+        self.lbl_fov.pack(side="left", padx=4)
+        self._fov_muestra()
         ttk.Button(b, text="Offset laser", command=self.off_pregun).pack(side="left", padx=(24, 3))
 
         cuerpo = ttk.PanedWindow(h, orient="horizontal")
@@ -657,10 +655,15 @@ class App(tk.Tk):
         self.prompt = "Foto congelada. Pon el cabezal ENCIMA de una marca y pulsa 3."
         self._congelar("top")
 
+    def _fov_muestra(self):
+        """Pinta el FOV guardado. Es un valor, no un campo donde escribir: para
+        cambiarlo esta la medida con dos clics o la casilla de Ajustes."""
+        self.lbl_fov.configure(text="FOV cabezal: %.2f mm" % float(self.cfg["head_fov_mm"]))
+
     def fov_foto(self):
         self.fovpts, self.modo = [], "fov"
         self.prompt = ("FOV: haz clic en los DOS extremos de una distancia que sepas "
-                       "de verdad, y pon arriba los mm que hay entre ellos.")
+                       "de verdad; despues te preguntare cuantos mm hay entre ellos.")
         self._congelar("head")
 
     def _foto_lista(self, fu):
@@ -683,8 +686,9 @@ class App(tk.Tk):
     def _clic(self, x, y):
         if self.modo == "fov":
             self.fovpts.append((x, y))
-            self.lbl_cal.configure(text="%d de 2 clics. Distancia en mm:"
-                                   % len(self.fovpts), style="Chico.TLabel")
+            self.lbl_cal.configure(text="%d de 2 clics%s" % (
+                len(self.fovpts), ": ahora te pido los mm" if len(self.fovpts) == 2 else ""),
+                                   style="Chico.TLabel")
             if len(self.fovpts) == 2:
                 self._fov()
             return
@@ -774,7 +778,7 @@ class App(tk.Tk):
         punto queda en A + d, y al centrarlo con la camara el panel marca P =
         A + d. De ahi -d = A - P, que es lo que se guarda."""
         def pedir(txt):
-            v = messagebox.askstring("Offset laser", txt, parent=self)
+            v = simpledialog.askstring("Offset laser", txt, parent=self)
             if v is None:
                 return None
             try:
@@ -810,22 +814,32 @@ class App(tk.Tk):
 
     def _fov(self):
         (x1, y1), (x2, y2) = self.fovpts
+        if (x1, y1) == (x2, y2):
+            self.lbl_cal.configure(text="los dos clics han caido en el mismo punto",
+                                   style="Mal.TLabel")
+            return
+        # La distancia se PREGUNTA, no se lee de la casilla de al lado: esa
+        # muestra el FOV guardado y releerla hacia que la segunda medida se
+        # comiera a si misma y no moviera nada.
+        v = simpledialog.askstring(
+            "Medir FOV", "Distancia REAL entre los dos clics, en mm:", parent=self)
+        if v is None:                       # cancelado: no se toca nada
+            return
         try:
-            d = float(self.ent_fov.get().strip().replace(",", "."))
+            d = float(v.strip().replace(",", "."))
         except ValueError:
             d = 0.0
         h, w = self.foto.foto.shape[:2]
-        if d <= 0 or (x1, y1) == (x2, y2):
-            self.lbl_cal.configure(text="distancia no valida: pon los mm arriba",
+        if d <= 0:
+            self.lbl_cal.configure(text="distancia no valida: pon los mm de verdad",
                                    style="Mal.TLabel")
             return
-        k = d / max(1e-6, ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5)
+        k = d / ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5
         cfg = hv.load_cfg()
         cfg["head_fov_mm"] = k * w
         hv.save_cfg(cfg)
-        self.ent_fov.delete(0, "end")
-        self.ent_fov.insert(0, "%.2f" % cfg["head_fov_mm"])
         self.cfg = cfg
+        self._fov_muestra()
         self.lbl_cal.configure(text="head_fov_mm = %.2f  (%.4f mm/px).  Vertical: %.2f mm"
                                 % (cfg["head_fov_mm"], k, k * h), style="Ok.TLabel")
 
@@ -957,6 +971,9 @@ class App(tk.Tk):
                     v = [float(x) for x in t.replace(";", ",").split(",") if x]
                 elif clave in ("top_cam", "head_cam", "marks", "thr", "min_area"):
                     v = int(float(t))
+                elif clave == "head_fov_mm":
+                    # float y no texto: hybrid_vision multiplica por este valor
+                    v = float(t.replace(",", "."))
                 else:
                     v = t
             except ValueError:
@@ -965,6 +982,7 @@ class App(tk.Tk):
             cfg[clave] = v
         hv.save_cfg(cfg)
         self.cfg = cfg
+        self._fov_muestra()                # las dos pestañas muestran lo mismo
         self.sentido()
         self.log("ajustes guardados en %s" % hv.CFG)
 
