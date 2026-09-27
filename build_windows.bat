@@ -37,4 +37,5 @@ echo === 5/5 listo
 dir /b dist\instalar_RuidaVision_*.exe
 echo.
 echo Para publicarlo como actualizacion OTA:
-echo   gh release create v%VER% dist\instalar_RuidaVision_%VER%.exe --prerelease
+rem Sin --prerelease: el OTA lee /releases/latest, que ignora los pre-releases.
+echo   gh release create v%VER% dist\instalar_RuidaVision_%VER%.exe
