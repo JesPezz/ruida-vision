@@ -88,6 +88,11 @@ def main():
         print(("  OK  " if cond else "FALLO ") + desc, flush=True)
 
     A.Video = VideoFalso
+    # La app mira sola si hay version nueva a los 800 ms, sin boton. Falsear
+    # `comprobar` ANTES de que ese `after` dispare: si no, la prueba sale a
+    # GitHub de verdad. Se comprueba luego que el aviso llego al pie, que es
+    # la prueba de que el `after` estaba bien enganchado.
+    A.actualizar.comprobar = lambda *a, **k: (False, "sin novedades", None)
     app = A.App()
     # save_cfg falso para TODO el recorrido: si una sola prueba se pasa y
     # guarda, escribe una H de mentira en el calib.json de la maquina y la
@@ -104,6 +109,8 @@ def main():
         isinstance(app.video, VideoFalso) and VideoFalso.instanciados)
     bombea(app)
     chk("el registro recibe lineas", app.txt.get("1.0", "end").strip() != "")
+    chk("la app mira las actualizaciones al arrancar, sin pulsar nada",
+        "sin novedades" in app.lbl_ota.cget("text"))
 
     # Dibujado de las dos camaras con imagen falsa: homografia, caja de viaje,
     # cruz del cabezal y el texto de SIN HOMOGRAFIA.
@@ -296,24 +303,24 @@ def main():
     un_frame()
     chk("solo se pinta la hoja que se ve",
         antes == [getattr(l, "img", None) for l in app.vivos[app.i_vivo]])
-    # El reparto de los tres visores: los dos en vivo no salen mas pequeños que
-    # la foto congelada, que era justo lo que se quejaba.
+    # El reparto de los cuatro: los dos visores en vivo, la foto congelada y la
+    # tabla de puntos. Medianamente era un PanedWindow con la izquierda al 75% y
+    # la foto encima de las camaras, y el reparto salia como salia. Ahora es
+    # una rejilla 2x2 con filas y columnas del mismo peso: los cuatro tienen que
+    # medir LO MISMO, no "parecidos".
     app.hojas.select(app.i_cal)
+    app.geometry("1200x780")
     app.update()
-    top, head = app.vivos[app.i_cal]
-    v_alto, h_alto = top.winfo_height(), head.winfo_height()
-    f_alto = app.foto.winfo_height()
-    chk("los visores en vivo ya no son una franja ilegible (%dx%d, foto %dx%d)"
-        % (top.winfo_width(), v_alto, app.foto.winfo_width(), f_alto),
-        min(v_alto, h_alto) > 80 and v_alto == h_alto)
-    chk("la foto congelada ya no se come la hoja", f_alto > 0
-        and v_alto / max(f_alto, 1) > 0.7)
-    # 5% de margen: la barra de la hoja se come unos pixeles de una columna.
-    anchos = sorted((top.winfo_width(), head.winfo_width()))
-    chk("los tres visores se reparten el ancho (%d/%d, foto %d)"
-        % (anchos[0], anchos[1], app.foto.winfo_width()),
-        anchos[1] - anchos[0] <= 0.05 * anchos[1]
-        and app.foto.winfo_width() > anchos[1])
+    celdas = [(w.winfo_width(), w.winfo_height(), w.winfo_class())
+              for w in app.celdas_cal]
+    anchos = sorted({c[0] for c in celdas})
+    altos = sorted({c[1] for c in celdas})
+    # 1 px de margen: la rejilla reparte el hueco sobrante en enteros y a una
+    # fila le toca uno mas. Lo que se persigue es que no haya una franja
+    # ilegible, no el pixel exacto.
+    chk("los cuatro elementos de Calibrar miden lo mismo %s" % (celdas,),
+        anchos[-1] - anchos[0] <= 1 and altos[-1] - altos[0] <= 1
+        and min(anchos[0], altos[0]) > 120)
 
     # Los botones llevan su nombre encima, no un icono. Se probaron los iconos
     # con tooltip y estorbaban: con la ventana estrecha habia que adivinar.
@@ -331,8 +338,16 @@ def main():
         len(bts) >= 20 and not hasattr(A, "ToolTip")
         and not hasattr(app, "_icono_camara")
         and not (set(nombres) & Iconos)
-        and {"Estacionar", "Renumerar", "Ver coords.txt", "Guardar ajustes"}
-        <= set(nombres))
+        and {"Origen 0,0", "1. Estacionar", "Renumerar", "Ver coords.txt",
+             "Guardar ajustes", "Detectar y centrar los 2"} <= set(nombres))
+    # "Estacionar" y "Origen 0,0" hacian lo mismo (park es (20,20) y el origen
+    # (0,0): 20 mm de diferencia). En Vivo se quito Estacionar; en Calibrar el
+    # del paso 1 se sigue llamando "1. Estacionar", asi que el nombre suelto no
+    # puede existir en ninguna hoja.
+    chk("Estacionar ya no es un boton suelto (Vivo usa Origen 0,0)",
+        "Estacionar" not in nombres and "Origen 0,0" in nombres)
+    chk("el boton de buscar actualizaciones ya no existe",
+        "Buscar actualizaciones" not in nombres)
     chk("los botones de mover dicen el eje (+Y, +X, -Y, -X)",
         [t for t in nombres if t in ("+Y", "+X", "-Y", "-X")] == ["+Y", "+X", "-Y", "-X"])
     app._boton_mover()
@@ -393,12 +408,25 @@ def main():
     # Marcas tiene que ENSENAR lo que ha visto el detector: la hoja se quedaba
     # en negro y no habia forma de saber si habia marcas o no. Se falsean las
     # rutas a un temporal: bed.png y coords.txt de verdad son de la maquina.
+    # H identidad y ROI que cubre el bed.png entero (640x480): px == mm y las
+    # dos manchas del temporal caen dentro, sean cuales sean los del calib.
     bed, coo = hv_bed_temp(app)
+    app.cfg["H"] = np.eye(3, dtype=np.float32).tolist()
+    app.v_roi.delete(0, "end")
+    app.v_roi.insert(0, "0,0,640,480")
     try:
         app._fin_marcas(None)
         chk("al terminar el run se ve la foto de la cama",
             getattr(app.foto_marcas, "foto", None) is not None)
         chk("las coordenadas van a la lista", len(app.lst.get(0, "end")) == 2)
+        # El fallo de verdad: `marcas_utiles` ya devuelve PIXELES, y _fin_marcas
+        # los volvia a desempaquetar por (mm, px). Salia una lista de numeros
+        # sueltos, `_pintar_marcas` reventaba al abrir el primero y se caian la
+        # foto en verde Y la lista. Mirar solo la foto no lo veia.
+        chk("el detector deja las DOS marcas para pintar",
+            len(app.foto_marcas.detectadas) == 2)
+        chk("las marcas se dibujan ENCIMA de la foto (2 ovalos + 2 numeros)",
+            len(app.foto_marcas.find_withtag("marcas")) == 4)
     finally:
         A.hv.BED_PNG, A.COORDS = app.__dict__.pop("_bed_real")
         os.unlink(bed)
@@ -407,6 +435,11 @@ def main():
     # El flujo de Print and Cut: detectar (sin mover) deja los dos puntos a la
     # vista, y el boton Mover va al primero y luego al segundo. Nada de copiar
     # y pegar: el usuario lee la posicion del cabezal en pantalla.
+    # Se parte del estado "sin detectar" a mano: _fin_marcas acaba de dejarlo
+    # con las dos marcas del bed.png falso, y lo que se prueba aqui es el boton
+    # apagado cuando NO hay puntos.
+    app.marcas2, app.i_marca = [], 0
+    app._boton_mover()
     chk("sin detectar no hay puntos que mover", app.marcas2 == []
         and "disabled" in str(app.btn_mover.state()))
     fake = [(1.5, 2.5), (61.0, 41.0)]

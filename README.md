@@ -10,6 +10,34 @@ hybrid_vision.py  cámaras, detección de marcas, homografía y flujo Print and 
 calib.json        se crea solo en `calibrate` (cámaras, FOV, homografía H, puntos)
 ```
 
+## Qué cambió en la v1.9
+
+Cuatro cosas que salieron de usar la v1.8 con la máquina delante:
+
+- **La actualización se mira sola al arrancar.** El botón `Buscar actualizaciones`
+  desapareció: estaba en el pie, no se veía y nadie lo pulsaba, así que las
+  versiones nuevas solo llegaban a quien se acordaba. Ahora la app consulta GitHub
+  a los 0,8 s de abrirse (cuando las cámaras ya están en marcha) y avisa en el pie;
+  instalar sigue siendo cosa tuya, con el mismo aviso de siempre.
+- **Calibrar reparte la hoja en cuatro celdas iguales.** Los dos visores en vivo,
+  la foto congelada y la tabla de puntos van en una rejilla 2×2 con filas y
+  columnas del mismo peso: los cuatro miden exactamente lo mismo (574 px de ancho
+  en ventana de 1200). Antes era un `PanedWindow` con la izquierda al 75%, la foto
+  encima de las cámaras y la tabla en una franja.
+- **Fuera el botón `Estacionar` de Vivo.** Hacía lo mismo que `Origen 0,0`: la
+  posición de estacionamiento es (20, 20) y el origen (0, 0), 20 mm de diferencia
+  que no cambian nada. Queda `Origen 0,0`. En Calibrar sigue el `1. Estacionar` de
+  la rutina de calibración, que sí es un paso con nombre propio.
+- **Print and Cut vuelve a enseñar las marcas.** Los dos puntos detectados se
+  dibujaban en verde sobre la foto y la lista de coordenadas se llenaba… hasta que
+  un doble desempaquetado lo reventaba en silencio: `marcas_utiles` ya devuelve
+  píxeles y `_fin_marcas` los volvía a abrir por `(mm, px)`. Salía una lista de
+  números sueltos, `_pintar_marcas` fallaba al abrir el primero y se caían **la
+  marca verde y la lista a la vez**, con un error solo en el registro. El botón
+  `Todo de una vez` pasa a llamarse `Detectar y centrar los 2` para que se lea lo
+  que hace: estaciona, mira la cama, lleva el cabezal a cada marca y la recentra
+  (el estacionamiento es lo que parece "recorrer las esquinas"; las marcas, no).
+
 ## Qué cambió en la v1.8
 
 - **Los botones vuelven a llevar su nombre.** En la v1.7 se les puso icono con leyenda

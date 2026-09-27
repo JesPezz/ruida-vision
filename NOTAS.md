@@ -1,13 +1,44 @@
 # Notas para la próxima sesión
 
-Estado: **v1.8, que es la v1.7 con los botones nombrados (y las barras en dos filas
-para que los nombres quepan).** La v1.7 son los siete ajustes de usarla en la máquina.
-Todo lo de abajo está verificado (`py -u hybrid_vision.py test`, `python ruida.py test`,
-`/root/venv/bin/python -m ruidavision.actualizar test`, y
-`/root/venv/bin/python -m ruidavision.prueba_app` → 0 fallos de 60 comprobaciones).
+Estado: **v1.9, que es la v1.8 con la actualización automática al arrancar, Calibrar en
+cuatro celdas iguales, fuera el botón Estacionar de Vivo, y las marcas del Print and Cut
+otra vez en verde.** Todo lo de abajo está verificado (`py -u hybrid_vision.py test`,
+`python ruida.py test`, `/root/venv/bin/python -m ruidavision.actualizar test`, y
+`/root/venv/bin/python -m ruidavision.prueba_app` → 0 fallos de 63 comprobaciones).
 Lo que queda es lo que solo se puede comprobar con la máquina delante, y está al final.
 
-## 0. Lo de esta versión (v1.7 y v1.8)
+## 0. Lo de esta versión (v1.9)
+
+1. **La actualización se mira sola al arrancar, sin botón.** El de `Buscar
+   actualizaciones` estaba en el pie y no se veía; se quita y en su lugar `__init__`
+   encola `self.after(800, self.ota)`, cuando las cámaras ya están abiertas. Sigue
+   preguntando antes de instalar (`_ota_vuelve`). La prueba falsea
+   `actualizar.comprobar` ANTES de que dispare el `after` (si no, sale a GitHub de
+   verdad) y comprueba que el aviso llega al pie, que es lo que demuestra que el
+   `after` está bien enganchado.
+2. **Calibrar, cuatro celdas iguales.** El `PanedWindow` de la v1.7 se sustituye por
+   una rejilla 2×2 (`cuerpo.rowconfigure/columnconfigure` con `weight=1,
+   uniform="cal"`): los dos visores en vivo, la foto congelada y la tabla de puntos
+   miden lo mismo. Medido: 574×280 / 574×280 / 574×279 / 574×279 (el píxel de menos
+   es el reparto entero de la rejilla). La prueba mira `app.celdas_cal` y exige ≤1 px
+   de diferencia, no el píxel exacto.
+3. **Fuera `Estacionar` de Vivo.** Hacía lo mismo que `Origen 0,0` (park = (20,20),
+   origen = (0,0): 20 mm). En Calibrar sigue el `1. Estacionar` de la rutina. La
+   prueba exige que `"Estacionar"` no sea el texto de ningún botón suelto.
+4. **Print and Cut: las marcas vuelven a verse.** `marcas_utiles` (hybrid_vision.py)
+   devuelve píxeles `(u, v)` y `_fin_marcas` los volvía a abrir por `(mm, px)`
+   (`[p for _, p in self.marcas_utiles]`): salía una lista de `numpy.float64`,
+   `_pintar_marcas` reventaba al abrir el primero y se caían **a la vez** la marca
+   verde sobre la foto y el llenado de la lista de coords (`_desdovar` se tragaba el
+   error y solo lo dejaba en el registro). Ahora se pasa `self.marcas_utiles` tal cual.
+   La prueba es NO VACUA: `len(app.foto_marcas.detectadas) == 2` y
+   `find_withtag("marcas")` devuelve 4 (2 óvalos + 2 números); antes solo se miraba
+   que la foto existiera, por eso el fallo pasó desapercibido. El botón `Todo de una
+   vez` pasa a `Detectar y centrar los 2` y se añade una ayuda que explica el ciclo
+   (estaciona → mira la cama → lleva a cada marca → la recentra). `lbl_punto` empieza
+   en rojo hasta que hay puntos, y pasa a verde con la posición real del cabezal.
+
+## 0.bis. Lo de la v1.7 y v1.8
 
 1. **El paso es un número en mm, no un desplegable** (`self.paso_mm`, `lbl_paso`,
    `_pon_paso`, `_cambia_paso`): `-` y `+` lo mueven en saltos de 0,1 mm entre
@@ -221,7 +252,7 @@ python ruida.py test                                      # protocolo del panel,
 py hybrid_vision.py calibrate --park 20,20                # ventana con las 2 cámaras
 
 # App de escritorio (en la Pi hace falta xvfb-run: no tiene escritorio real)
-/root/venv/bin/python -m ruidavision.prueba_app           # 60 comprobaciones de GUI y jog
+/root/venv/bin/python -m ruidavision.prueba_app           # 63 comprobaciones de GUI y jog
 /root/venv/bin/python -m ruidavision.actualizar test      # 13 del descargador y el arranque
 ```
 
