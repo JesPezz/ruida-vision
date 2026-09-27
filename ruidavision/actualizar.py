@@ -40,10 +40,21 @@ def hay_actualizacion(mia, tag):
     return bool(tag) and numeros(tag) > numeros(mia)
 
 
+def _peticion(url):
+    """La peticion con su User-Agent (GitHub responde 403 sin el).
+
+    headers por palabra clave, siempre: el segundo posicional de Request es
+    `data`, y ahi el dict se vuelve el cuerpo y urlopen revienta. El actualizador
+    fallaba en silencio, sin red y sin avisar.
+    """
+    return urllib.request.Request(url, headers={
+        "User-Agent": UA, "Accept": "application/vnd.github+json"})
+
+
 def _abrir(url, timeout=TIMEOUT):
-    # GitHub devuelve 403 a las peticiones sin User-Agent
-    return urllib.request.urlopen(urllib.request.Request(url, headers={
-        "User-Agent": UA, "Accept": "application/vnd.github+json"}), timeout)
+    # timeout por palabra clave tambien: el segundo posicional de urlopen es
+    # `data` y ahi el timeout se mandaba como cuerpo (y el error decia <int>).
+    return urllib.request.urlopen(_peticion(url), timeout=timeout)
 
 
 def release(repo=REPO):
@@ -143,8 +154,15 @@ def test():
     chk("busca el .exe", instalador({"assets": [
         {"name": "notas.txt"}, {"name": "instalar_RuidaVision_1.1.exe"}]}
     ).get("name"), "instalar_RuidaVision_1.1.exe")
+    # La peticion se construye bien o no hay actualizacion que llegue: sin
+    # User-Agent GitHub da 403 y con `data` de mas urlopen ni responde.
+    p = _peticion("https://api.github.com/repos/x/y/releases/latest")
+    chk("la peticion no lleva cuerpo", p.data, None)
+    chk("la peticion lleva User-Agent", bool(p.get_header("User-agent")), True)
+    chk("la peticion pide JSON de GitHub",
+        p.get_header("Accept"), "application/vnd.github+json")
     print("actualizador: %d comprobaciones OK" % ok)
-    return 0 if ok == 7 else 1
+    return 0 if ok == 10 else 1
 
 
 if __name__ == "__main__":
