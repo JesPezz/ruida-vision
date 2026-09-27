@@ -2,3 +2,13 @@ __pycache__/
 *.pyc
 scan_idx*.png
 coords.txt
+
+# Empaquetado
+build/
+dist/
+*.egg-info/
+*.exe
+*.ico
+# Datos que escribe la app en su carpeta
+app.log
+RuidaVision/
