@@ -10,6 +10,30 @@ hybrid_vision.py  cámaras, detección de marcas, homografía y flujo Print and 
 calib.json        se crea solo en `calibrate` (cámaras, FOV, homografía H, puntos)
 ```
 
+## Qué cambió en la v1.6
+
+Lo que se arregló en esta versión, todo a raíz de la usar en la máquina:
+
+- **Las teclas `-` y `+` cambian el paso del toque** sin soltar el WASD. El paso
+  fino se usa justo mientras se está moviendo, y hasta ahora había que soltar la
+  tecla para ir al desplegable. Sigue estando el desplegable, que va a la par.
+- **Calibrar enseña los tres visores a la vez**: las dos cámaras en vivo (con la
+  cruz del cabezal y la caja de viaje) y, debajo, la foto congelada con las manchas
+  en verde. Antes la cámara en vivo y la congelada compartían un mismo lienzo, así
+  que solo se veía una de las dos.
+- **Marcas (Print and Cut) ya no sale en negro.** Al terminar el run se ve lo que
+  vio el detector — la foto de la cama con las manchas marcadas — al lado de la
+  lista de coordenadas, y arriba hay dos líneas de cómo se usa la pestaña. Se puede
+  comprobar si ha detectado 2 manchas o 20 antes de tocar nada.
+- **Ajustar los puntos ya no dice "Error de reproyeccion"** cuando el ajuste es
+  bueno. Ahora dice "residuo del ajuste", y recuerda que 0,1–0,2 mm es lo normal.
+  (Lo del residuo va en el registro y en el mensaje de la propia pestaña.)
+- **Arreglado el `WinError 10048` que rompía la pestaña Marcas.** El panel de la
+  Ruida escucha en un puerto fijo (40207) y el run de marcas abría un segundo en el
+  mismo puerto: `bind()` fallaba, el run se caía sin escribir `coords.txt` y la
+  pestaña se quedaba en "sin coordenadas: mira el registro de abajo". Ahora la app
+  suelta su panel antes de arrancar el cálculo, y lo vuelve a abrir después.
+
 ## Qué cambió en la v1.5
 
 Lo que se arregló en esta versión, con lo medido en esta máquina:

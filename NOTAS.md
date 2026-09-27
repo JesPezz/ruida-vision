@@ -1,11 +1,35 @@
 # Notas para la próxima sesión
 
-Estado: **v1.5, los cinco problemas reportados arreglados y con pruebas que los cubren.**
+Estado: **v1.6, la v1.5 más los cuatro ajustes que salieron de usarla en la máquina.**
 Todo lo de abajo está verificado (`py -u hybrid_vision.py test`, `python ruida.py test`,
 `/root/venv/bin/python -m ruidavision.prueba_app` → 0 fallos). Lo que queda es lo que
 solo se puede comprobar con la máquina delante, y está al final.
 
-## 0. Lo de esta versión (v1.5)
+## 0. Lo de esta versión (v1.6)
+
+1. **`-` y `+` cambian el paso del toque** (`_cambia_paso`, tabla `PASOS` en app.py),
+   sin soltar el WASD. El desplegable se queda.
+2. **Calibrar con los tres visores a la vez**: `self.vivos = {hoja: (cenital, cabezal)}`
+   y `_pintar` pinta solo los de la hoja visible. La foto congelada (`self.foto`) es un
+   `Foto` aparte, debajo. Se elimina `_visor_cal` y con ella `hay_foto` (ya no lo leía
+   nadie: los dos visores ya no se pisan nunca).
+3. **Marcas enseña la foto de la cama** (`self.foto_marcas`) con las manchas
+   re-marcadas por el mismo `find_marks` que el run usó, al lado de la lista de
+   coordenadas, y dos líneas de explicación. `bed.png` se relee con
+   `IMREAD_GRAYSCALE`: el detector y el lienzo quieren gris, no BGR.
+4. **`WinError 10048` al ejecutar Marcas — ARREGLADO.** Causa: `ruida.Panel.__init__`
+   hace `bind(("0.0.0.0", SRC_PANEL))` con `SRC_PANEL = 40207` **fijo**, y la app
+   tenía su panel vivo (para el jog) mientras `cmd_run` abría el suyo. El `bind`
+   reventaba, el run moría sin escribir `coords.txt` y la pestaña se quedaba en
+   "sin coordenadas: mira el registro". Ahora `_run` (y `scan_cams`) sueltan
+   `self.maq` antes de lanzar el cálculo. **No** se pasa a puerto efímero (el panel
+   manda los informes de posición a un puerto fijo) ni se pone `SO_REUSEADDR` (el
+   kernel repartiría los datagramas entre los dos sockets).
+5. **El "Error de reproyeccion" de la v1.5 era un susto con nombre.** Era el residuo
+   del ajuste de homografía impreso sin contexto: 0,202 mm máximo / 0,082 medio es
+   excelente. Ahora dice "residuo del ajuste" y aclara que 0,1–0,2 mm es normal.
+
+## 0-bis. Lo de la v1.5
 
 1. **El OTA no descargaba.** La ruta de destino era relativa al `cwd` del ejecutable
    (bajo `Program Files` no hay permiso) y la app se cerraba igual. Ahora: descarga a

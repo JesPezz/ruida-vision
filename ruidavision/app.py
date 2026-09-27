@@ -72,6 +72,10 @@ COORDS = os.path.join(DATOS, "coords.txt")
 # de mover y capturar se dice que no, en vez de reventar con un traceback en
 # una ventana que no se ve.
 FLECHAS = {"Up": "+Y", "Down": "-Y", "Left": "-X", "Right": "+X"}
+# Teclas que cambian el paso del toque, como el desplegable pero sin soltar el
+# WASD. `minus` es el guion de la fila de numeros y `KP_Subtract` el del teclado
+# numerico, que es donde algunos teclados lo ponen.
+PASOS = {"minus": -1, "KP_Subtract": -1, "plus": 1, "KP_Add": 1, "equal": 1}
 SIN_CAM = "camaras: sin abrir (pulsa Conectar)"
 LASER = "LASER APAGADO: esto mueve el cabezal, no dispara"
 
@@ -291,7 +295,10 @@ class App(tk.Tk):
         self._jog_t = None               # la pulsacion se esta volviendo continua
         self._jog_p = None               # parada pendiente (debounce del repeat)
         self._jog_ev = None              # Event del continuo en curso
-        self.hay_foto = False            # hay foto congelada en Calibrar
+        # Que visores en vivo hay que pintar en cada hoja. Se dibujan solo los de
+        # la hoja visible: pintar los de las dos hojas cada 33 ms son seis
+        # conversiones de imagen por segundo y frame que no se ven.
+        self.vivos = {}
 
         self._estilo()
         self._cabecera()
@@ -302,7 +309,6 @@ class App(tk.Tk):
         self._hoja_marcas()
         self._hoja_ajustes()
         self._pie()
-        self.hojas.bind("<<NotebookTabChanged>>", self._al_cambiar_hoja)
         self.protocol("WM_DELETE_WINDOW", self.salir)
         self.bind("<KeyPress>", self._tecla)
         self.bind("<KeyRelease>", self._suelta_tecla)
@@ -407,6 +413,7 @@ class App(tk.Tk):
     def _hoja_vivo(self):
         h = ttk.Frame(self.hojas, padding=8)
         self.hojas.add(h, text="  Vivo  ")
+        self.i_vivo = self.hojas.index(h)
         b = ttk.Frame(h)
         b.pack(fill="x")
         # La casita es "Estacionamiento": donde se para la maquina. El texto se
@@ -419,7 +426,7 @@ class App(tk.Tk):
                          ("Parar motor", self.stop),
                          ("Origen (0,0)", lambda: self.ir_a(0.0, 0.0))):
             ttk.Button(b, text=txt, command=cmd).pack(side="left", padx=3)
-        ttk.Label(b, text="paso (toque):").pack(side="left", padx=(18, 3))
+        ttk.Label(b, text="paso (toque)  -/+:").pack(side="left", padx=(18, 3))
         self.cmb = ttk.Combobox(b, state="readonly", width=8,
                                 values=["%.2f mm" % v for v in hv.STEP_MM])
         self.cmb.current(1)
@@ -436,6 +443,7 @@ class App(tk.Tk):
         cuerpo.pack(fill="both", expand=True, pady=6)
         self.im_top = self._marco(cuerpo, "CENITAL")
         self.im_head = self._marco(cuerpo, "CABEZAL (microscopio)")
+        self.vivos[self.i_vivo] = (self.im_top, self.im_head)
 
         m = ttk.Frame(h)
         m.pack(fill="x")
@@ -570,10 +578,23 @@ class App(tk.Tk):
         ordenes. Mantener la tecla mueve de forma continua."""
         if self._escribiendo():
             return                      # se esta escribiendo: no muevas nada
+        if e.keysym in PASOS:
+            self._cambia_paso(PASOS[e.keysym])
+            return "break"
         d = self._dir(e)
         if d:
             self._toque(d)
             return "break"
+
+    def _cambia_paso(self, d):
+        """`-` y `+` cambian el paso del toque, sin soltar el WASD.
+
+        El paso se elegia solo con el desplegable y con el cabezal en la mano
+        habia que dejar el raton: el paso fino se usa justo cuando se esta
+        moviendo, y el desplegable no se puede tocar sin soltar la tecla."""
+        i = max(0, min(len(hv.STEP_MM) - 1, self.cmb.current() + d))
+        self.cmb.current(i)
+        self.log("paso de toque: %.2f mm" % hv.STEP_MM[i])
 
     def _suelta_tecla(self, e):
         if self._escribiendo():
@@ -641,8 +662,19 @@ class App(tk.Tk):
 
         cuerpo = ttk.PanedWindow(h, orient="horizontal")
         cuerpo.pack(fill="both", expand=True, pady=6)
-        self.foto = Foto(cuerpo, self._clic)
-        cuerpo.add(self.foto, weight=3)
+        izq = ttk.Frame(cuerpo)
+        cuerpo.add(izq, weight=3)
+        # Los tres visores que hacen falta para encajar un punto: las dos
+        # camaras en vivo (donde se ve el cabezal) y debajo la foto congelada
+        # con las manchas. Antes solo estaba la congelada, y al entrar en la hoja
+        # no se veia nada hasta que congelabas.
+        vivos = ttk.Frame(izq)
+        vivos.pack(fill="both", expand=True)
+        cal_top = self._marco(vivos, "CENITAL (en vivo)")
+        cal_head = self._marco(vivos, "CABEZAL (en vivo)")
+        self.vivos[self.i_cal] = (cal_top, cal_head)
+        self.foto = Foto(izq, self._clic)
+        self.foto.pack(fill="both", expand=True, pady=(4, 0))
         d = ttk.Frame(cuerpo, padding=6)
         cuerpo.add(d, weight=1)
         ttk.Label(d, text="Puntos:  pixel de la cenital = maquina",
@@ -718,7 +750,6 @@ class App(tk.Tk):
         g, d = fu.result()
         if g is not None:
             self.foto.poner(g, d)
-            self.hay_foto = True           # a partir de aqui es foto fija
             # El recuento va debajo del aviso: es la respuesta a "las ha visto o
             # no". Las de la camara del cabezal no son marcas, asi que ahi solo
             # se cuentan como referencia de que la foto tiene contraste.
@@ -797,9 +828,9 @@ class App(tk.Tk):
             cfg["points"] = [[list(px[i]), list(mm[i])]
                              for i in range(len(px)) if i not in malos]
             hv.save_cfg(cfg)
-            return ("Error de reproyeccion sobre %d de %d puntos:  max %.3f mm,  "
-                    "medio %.3f mm.  Homografia guardada."
-                    % (len(cfg["points"]), len(px), e_max, e_avg))
+            return ("Residuo del ajuste: %.3f mm maximo sobre %d puntos, %.3f medio. "
+                    "Homografia guardada (0.1-0.2 mm es normal)."
+                    % (e_max, len(px), e_avg))
         self._tarea(f, al_terminar=self._ajustado)
 
     def _ajustado(self, fu):
@@ -866,7 +897,6 @@ class App(tk.Tk):
     def cal_limpia(self):
         self.puntos = []
         self.numeros = []
-        self.hay_foto = False
         self._retabla()
         self.lbl_cal.configure(text="", style="Chico.TLabel")
 
@@ -971,6 +1001,14 @@ class App(tk.Tk):
     def _hoja_marcas(self):
         h = ttk.Frame(self.hojas, padding=8)
         self.hojas.add(h, text="  Marcas (Print and Cut)  ")
+        ttk.Label(h, text="1 Ejecutar: la maquina mira la hoja, busca las manchas de la "
+                          "marca de registro y lleva el cabezal a la 1; luego afina con "
+                          "las camaras.  2 Copia el X y la Y de la marca 1 en LightBurn, "
+                          "Print and Cut, y las coordenadas del resto salen en el "
+                          "registro.  Las dos camaras se desconectan mientras dura: el "
+                          "calculo abre las suyas y el puerto del panel es uno solo.",
+                  style="Chico.TLabel", wraplength=900, justify="left").pack(
+            anchor="w", pady=(0, 4))
         b = ttk.Frame(h)
         b.pack(fill="x")
         ttk.Button(b, text="Ejecutar", command=self.run_marcas).pack(side="left")
@@ -983,12 +1021,19 @@ class App(tk.Tk):
         self.v_roi.pack(side="left", padx=4)
         ttk.Button(b, text="Abrir coords.txt", command=self.abrir_coords).pack(side="right")
         ttk.Button(b, text="Copiar todo", command=self.copiar).pack(side="right", padx=4)
-        self.lst = tk.Listbox(h, font=("Consolas", 11), height=20, bg="#101418",
-                              fg="#cfd8dc", activestyle="none")
-        self.lst.pack(fill="both", expand=True, pady=6)
+
+        cuerpo = ttk.Frame(h)
+        cuerpo.pack(fill="both", expand=True, pady=6)
+        self.foto_marcas = Foto(cuerpo)
+        self.foto_marcas.pack(side="left", fill="both", expand=True)
+        self.lst = tk.Listbox(cuerpo, font=("Consolas", 11), height=20, bg="#101418",
+                              fg="#cfd8dc", activestyle="none", width=34)
+        self.lst.pack(side="left", fill="y", padx=(6, 0))
         self.lst.bind("<<ListboxSelect>>", self._copia_una)
-        ttk.Label(h, text="Clic en una linea = copiarla sola. En LightBurn, Print and "
-                          "Cut: pega X e Y de la marca 1.", style="Chico.TLabel").pack(anchor="w")
+        ttk.Label(h, text="A la izquierda, lo que ha visto el detector: la foto de la "
+                          "cama con las manchas en verde. A la derecha, las coordenadas "
+                          "en mm. Clic en una linea = copiarla sola.", style="Chico.TLabel",
+                  wraplength=900, justify="left").pack(anchor="w")
 
     def _ent(self, padre, txt, val):
         ttk.Label(padre, text="  %s:" % txt).pack(side="left", padx=(16, 3))
@@ -1016,13 +1061,32 @@ class App(tk.Tk):
         if self.video:
             self.log("se desconectan las camaras: el calculo abre las suyas")
         self.parar_cams()
+        # El panel de la Ruida escucha en un puerto FIJO (40207) y el run abre el
+        # suyo: dos sockets en el mismo puerto dan [WinError 10048] y el run se
+        # cae sin escribir coords.txt ("sin coordenadas: mira el registro"). Se
+        # suelta aqui y `Maquina.get()` lo vuelve a abrir cuando haga falta.
+        if self.maq.mq:
+            self.log("se suelta el panel del cabezal: el puerto es uno solo")
+            self.maq.cerrar()
         self.lst.delete(0, "end")
         self.coords = []
         self._volvio = bool(self.video)
         self._tarea(fn, ns, al_terminar=self._fin_marcas)
 
     def _fin_marcas(self, _fu):
-        """El `run` de hybrid_vision deja las coordenadas en coords.txt."""
+        """El `run` de hybrid_vision deja las coordenadas en coords.txt y la foto
+        de la cama con las manchas en bed.png."""
+        # bed.png es el frame GRIS de la cenital que guardo el run: se relee en
+        # gris, que es lo que espera el detector y el lienzo.
+        g = cv2.imread(hv.BED_PNG, cv2.IMREAD_GRAYSCALE) \
+            if os.path.exists(hv.BED_PNG) else None
+        if g is not None:
+            # Las manchas se vuelven a marcar sobre el PNG con los mismos
+            # parametros: es lo que el detector vio, no un dibujo nuestro.
+            d = hv.find_marks(g, min_area=self.cfg["min_area"],
+                              max_area=self.cfg["max_area"],
+                              thr=self.cfg["thr"], merge=6)
+            self.foto_marcas.poner(g, [(u, v) for u, v, _ in d])
         if os.path.exists(COORDS):
             self.coords = [l.strip() for l in
                            open(COORDS, encoding="utf-8").read().splitlines() if l.strip()]
@@ -1115,6 +1179,7 @@ class App(tk.Tk):
         self.log("ajustes guardados en %s" % hv.CFG)
 
     def scan_cams(self):
+        self.parar_cams()               # el scan abre todos los indices
         self._tarea(hv.cmd_scan, self._ns(max_idx=8),
                     al_terminar=lambda fu: self.log("mira los scan_idx*.png en %s" % DATOS))
 
@@ -1126,28 +1191,12 @@ class App(tk.Tk):
                 self._n = n
                 self._estado_cams(n, top, head)
                 if top is not None and head is not None:
-                    self._foto(self.im_top, self._con_top(top))
-                    self._foto(self.im_head, self._con_head(head))
+                    vis = self.vivos.get(self.hojas.index("current"))
+                    if vis:
+                        self._foto(vis[0], self._con_top(top))
+                        self._foto(vis[1], self._con_head(head))
                     self._cada_paso()
-                    self._visor_cal()
         self.after(33, self._pintar)
-
-    # ------------------------------------------------------- visor de Calibrar
-    def _visor_cal(self):
-        """En la hoja Calibrar, mientras no haya foto congelada, la foto ES un
-        visor en vivo de la cenital. Antes salia a negro al entrar en la hoja y
-        habia que congelar solo para ver donde estas."""
-        if self.hay_foto or self.hojas.index("current") != self.i_cal:
-            return
-        if not self.video or not self.video.is_alive():
-            return
-        n, top, _ = self.video.frame()
-        if top is not None:
-            self.foto.poner(top, [])
-
-    def _al_cambiar_hoja(self, e=None):
-        if self.hojas.index("current") == self.i_cal:
-            self._visor_cal()
 
     def _foto(self, lab, bgr):
         h, w = bgr.shape[:2]

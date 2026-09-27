@@ -642,7 +642,8 @@ def cmd_calibrate(a):
         # proxima calibracion los volveria a meter y a contaminar el ajuste.
         cfg["H"] = H.tolist()
         cfg["points"] = [(px[i], mm[i]) for i in range(len(px)) if i not in malos]
-        print("\nerror de reproyeccion sobre %d puntos: max %.3f mm, medio %.3f mm"
+        print("\nresiduo del ajuste: sobre %d puntos, max %.3f mm, medio %.3f mm"
+              "  (0.1-0.2 mm es normal, no es un error)"
               % (len(cfg["points"]), e_max, e_avg))
         for i in malos:
             print("  DESCARTADO el punto %d (pixel %.1f, %.1f = maquina "

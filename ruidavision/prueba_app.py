@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -55,6 +56,24 @@ class VideoFalso:
 
     def frame(self):
         return self.n, self.top_im, self.head_im
+
+
+def hv_bed_temp(app):
+    """bed.png y coords.txt falsos, en un temporal, y las rutas de la app
+    apuntando a ellos. Devuelve las dos rutas para borrarlas."""
+    d = tempfile.mkdtemp()
+    bed = os.path.join(d, "bed.png")
+    coo = os.path.join(d, "coords.txt")
+    import cv2
+    g = np.full((480, 640), 250, "uint8")
+    cv2.circle(g, (200, 200), 12, 0, -1)         # una mancha
+    cv2.circle(g, (400, 300), 12, 0, -1)         # otra
+    cv2.imwrite(bed, g)
+    open(coo, "w", encoding="utf-8").write("1  12.500, 20.250 mm\n"
+                                           "2  60.000, 70.100 mm\n")
+    app.__dict__["_bed_real"] = (A.hv.BED_PNG, A.COORDS)
+    A.hv.BED_PNG, A.COORDS = bed, coo
+    return bed, coo
 
 
 def main():
@@ -248,18 +267,70 @@ def main():
     app.puntos = []
     app.numeros = []
 
-    # El visor de Calibrar sale en negro hasta que se congela una foto. Al
-    # entrar en la pestaña tiene queenseñar la camara en directo.
+    # Calibrar tiene que enseñar los TRES visores a la vez: las dos camaras en
+    # vivo y la foto congelada con los puntos. Antes solo estaba la congelada y
+    # al entrar en la hoja no se veia nada.
     app.video = VideoFalso(app.cfg, app.log)
-    app.video.top_im = np.zeros((480, 640, 3), "uint8")
-    app.hay_foto = False
+    # el video entrega frames en GRIS: _con_top/_con_head los pintan en BGR
+    app.video.top_im = np.full((480, 640), 120, "uint8")
+    app.video.head_im = np.full((480, 640), 90, "uint8")
+
+    def un_frame():
+        app._n = -1                        # fuerza a redibujar
+        app.update()
+        app._pintar()                     # un turno: no encola el siguiente
     app.hojas.select(app.i_cal)
-    app._al_cambiar_hoja()
-    chk("al entrar en Calibrar se ve la camara en directo",
-        getattr(app.foto, "foto", None) is app.video.top_im)
-    app.hay_foto = True                       # con foto congelada, no se pisa
-    app._visor_cal()
-    chk("con foto congelada el visor no se pisa", app.foto.foto is app.video.top_im)
+    un_frame()
+    vis = app.vivos.get(app.i_cal)
+    chk("Calibrar tiene los dos visores en vivo", vis is not None and len(vis) == 2
+        and all(getattr(l, "img", None) is not None for l in vis))
+    chk("la foto congelada sigue siendo un visor aparte",
+        app.foto is not vis[0] and app.foto is not vis[1])
+    app.hojas.select(app.i_vivo)
+    antes = [getattr(l, "img", None) for l in app.vivos[app.i_vivo]]
+    app.hojas.select(app.i_cal)
+    un_frame()
+    chk("solo se pinta la hoja que se ve",
+        antes == [getattr(l, "img", None) for l in app.vivos[app.i_vivo]])
+
+    # - y + eligen el paso de toque sin soltar el WASD.
+    chk("el desplegable arranca en el paso de medio", app.cmb.current() == 1)
+    app._cambia_paso(-99)
+    chk("el paso mas fino es el ultimo", app.cmb.current() == 0)
+    app._cambia_paso(1)
+    app._cambia_paso(1)
+    chk("+ sube el paso de toque", app.cmb.current() == 2)
+    app._cambia_paso(99)
+    chk("el paso mas gordo es el primero",
+        app.cmb.current() == len(A.hv.STEP_MM) - 1)
+    app._cambia_paso(-99)
+    app.hojas.select(app.i_vivo)
+
+    # El panel de la Ruida escucha en un puerto fijo: si el run de Marcas lo
+    # encuentra abierto, bind() falla con [WinError 10048], el run se cae y no
+    # se escribe coords.txt ("sin coordenadas: mira el registro").
+    app.maq.mq = SimpleNamespace(close=lambda: None)
+    app.maq.ip = app.cfg["ip"]
+    app._volvio = bool(app.video)
+    app.parar_cams()
+    app._tarea = lambda fn, *a, **kw: fn(*a)
+    app._run(lambda ns: None, app._ns(marks=1))
+    chk("el run suelta el panel del cabezal antes de abrir el suyo",
+        app.maq.mq is None)
+
+    # Marcas tiene que ENSENAR lo que ha visto el detector: la hoja se quedaba
+    # en negro y no habia forma de saber si habia marcas o no. Se falsean las
+    # rutas a un temporal: bed.png y coords.txt de verdad son de la maquina.
+    bed, coo = hv_bed_temp(app)
+    try:
+        app._fin_marcas(None)
+        chk("al terminar el run se ve la foto de la cama",
+            getattr(app.foto_marcas, "foto", None) is not None)
+        chk("las coordenadas van a la lista", len(app.lst.get(0, "end")) == 2)
+    finally:
+        A.hv.BED_PNG, A.COORDS = app.__dict__.pop("_bed_real")
+        os.unlink(bed)
+        os.unlink(coo)
 
     # La descarga de la OTA se armaba con os.path.dirname del nombre del
     # adjunto, que en un nombre suelto es "", dejando una ruta RELATIVA: la
@@ -337,7 +408,7 @@ def main():
     # es lo que se ve al terminar esta prueba sin que se quede colgada.
     chk("el pool de trabajo queda cerrado", app.pool._shutdown is True)
     A.hv.save_cfg = save_real          # ya nadie puede escribir el calib.json
-    print("app: %d fallos" % len(fallos))
+    print("app: %d fallos %s" % (len(fallos), fallos or ""))
     return 1 if fallos else 0
 
 
