@@ -304,6 +304,10 @@ class App(tk.Tk):
         self.bind("<KeyRelease>", self._suelta_tecla)
         self.after(33, self._pintar)
         self.after(120, self._desdovar)
+        # Las camaras solas al arrancar: hadia que pulsar "Conectar camaras".
+        # Con 200 ms la ventana ya esta mappeada, que es lo que necesita cv2
+        # para abrir la camara.
+        self.after(200, self.conectar)
         self.log("App %s. Datos en %s. %s" % (VERSION, DATOS, LASER))
 
     # -- aspecto
@@ -401,8 +405,14 @@ class App(tk.Tk):
         self.hojas.add(h, text="  Vivo  ")
         b = ttk.Frame(h)
         b.pack(fill="x")
-        for txt, cmd in (("Conectar camaras", self.conectar), ("Desconectar", self.parar_cams),
-                         ("Estacionamiento", self.park), ("Parar motor", self.stop),
+        # La casita es "Estacionamiento": donde se para la maquina. El texto se
+        # queda como pista al lado, porque un icono solo no se explica solo.
+        ttk.Button(b, text="⌂", width=3, command=self.park).pack(side="left")
+        ttk.Label(b, text="= Estacionamiento", style="Chico.TLabel").pack(
+            side="left", padx=(2, 0))
+        for txt, cmd in (("Conectar camaras", self.conectar),
+                         ("Desconectar", self.parar_cams),
+                         ("Parar motor", self.stop),
                          ("Origen (0,0)", lambda: self.ir_a(0.0, 0.0))):
             ttk.Button(b, text=txt, command=cmd).pack(side="left", padx=3)
         ttk.Label(b, text="paso (toque):").pack(side="left", padx=(18, 3))
@@ -593,11 +603,12 @@ class App(tk.Tk):
         for txt, cmd in (("1 Estacionamiento", self.cal_park),
                          ("2 Congelar foto", self.cal_foto),
                          ("Ajustar y guardar", self.cal_ajusta),
-                         ("Quitar el ultimo", self.cal_quita),
+                         ("Quitar punto", self.cal_quita),
                          ("Borrar puntos", self.cal_limpia)):
             ttk.Button(b, text=txt, command=cmd).pack(side="left", padx=3)
-        ttk.Label(b, text="  el clic en la foto guarda el punto solo",
-                  style="Chico.TLabel").pack(side="left", padx=8)
+        ttk.Label(b, text="  el clic en la foto guarda el punto solo; en la tabla, "
+                          "Supr quita el marcado", style="Chico.TLabel").pack(
+            side="left", padx=8)
         ttk.Button(b, text="Medir FOV", command=self.fov_foto).pack(side="left")
         self.lbl_fov = ttk.Label(b, text="", style="Chico.TLabel")
         self.lbl_fov.pack(side="left", padx=4)
@@ -619,6 +630,7 @@ class App(tk.Tk):
             self.tabla.heading(c, text=t)
             self.tabla.column(c, width=w, anchor="center")
         self.tabla.pack(fill="both", expand=True)
+        self.tabla.bind("<Delete>", lambda e: self.cal_quita())
         self.lbl_cal = ttk.Label(d, text="", style="Chico.TLabel", wraplength=320,
                                  justify="left")
         self.lbl_cal.pack(anchor="w", pady=6)
@@ -656,9 +668,16 @@ class App(tk.Tk):
         self._congelar("top")
 
     def _fov_muestra(self):
-        """Pinta el FOV guardado. Es un valor, no un campo donde escribir: para
-        cambiarlo esta la medida con dos clics o la casilla de Ajustes."""
-        self.lbl_fov.configure(text="FOV cabezal: %.2f mm" % float(self.cfg["head_fov_mm"]))
+        """Pinta el FOV guardado en las DOS pestanas. Sin refrescar la casilla de
+        Ajustes, medir el FOV la dejaba con el valor viejo y el siguiente Guardar
+        se lo comia: la medida se perdia por un boton de otra pestana.
+        `campos` todavia no existe cuando se pinta la hoja de Calibrar."""
+        v = float(self.cfg["head_fov_mm"])
+        self.lbl_fov.configure(text="FOV cabezal: %.2f mm" % v)
+        e = getattr(self, "campos", {}).get("head_fov_mm")
+        if e is not None:
+            e.delete(0, "end")
+            e.insert(0, "%.2f" % v)
 
     def fov_foto(self):
         self.fovpts, self.modo = [], "fov"
@@ -758,9 +777,18 @@ class App(tk.Tk):
         self.lbl_cal.configure(text="", style="Chico.TLabel")
 
     def cal_quita(self):
-        """Un clic en la mancha de al lado no se puede quitar de otro modo: hay
-        que rehacer los seis puntos por un solo error."""
-        if self.puntos:
+        """Quita el punto SELECCIONADO de la tabla, o el ultimo si no hay nada
+        marcado. Con "el ultimo" solamente no habia manera de quitar el punto
+        equivocado que caia en medio de la lista, y habia que rehacer los seis.
+        Por eso ademas esta la tecla Supr en la tabla."""
+        sel = self.tabla.selection()
+        if sel:
+            # Las filas van en orden de la lista, asi que la fila "n" es el
+            # punto n-1. Se borran de mayor a menor para que los indices
+            # de los que quedan no se muevan.
+            for s in sorted(sel, key=lambda s: self.tabla.index(s), reverse=True):
+                del self.puntos[int(self.tabla.item(s, "values")[0]) - 1]
+        elif self.puntos:
             self.puntos.pop()
         self._retabla()
         self.lbl_cal.configure(text="quedan %d puntos" % len(self.puntos),
@@ -983,6 +1011,10 @@ class App(tk.Tk):
         hv.save_cfg(cfg)
         self.cfg = cfg
         self._fov_muestra()                # las dos pestañas muestran lo mismo
+        # Maquina.get() cachea hv.Machine con la config de cuando se creo, y
+        # solo lo rehace si cambia la IP: con el coche cacheado, Guardar un
+        # estacionamiento nuevo no movia nada, iba al de antes.
+        self.maq.cerrar()
         self.sentido()
         self.log("ajustes guardados en %s" % hv.CFG)
 

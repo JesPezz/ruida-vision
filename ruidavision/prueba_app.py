@@ -27,6 +27,34 @@ def bombea(app, segundos=1.2):
         time.sleep(0.03)
 
 
+class VideoFalso:
+    """Sustituto de app.Video: la camara de verdad no se abre en la prueba.
+
+    Se falsea la CLASE, no el metodo `conectar`: el `after` del arranque se
+    guarda el metodo ya enlazado, y cambiar el atributo despues no surte
+    efecto (la prueba abriria las camaras de verdad).
+    """
+    instanciados = []
+
+    def __init__(self, cfg, avisar):
+        self.parar = threading.Event()
+        self.n = 0
+        self.top_im = self.head_im = None
+        type(self).instanciados.append(self)
+
+    def start(self):
+        pass
+
+    def is_alive(self):
+        return True
+
+    def join(self, timeout=None):
+        pass
+
+    def frame(self):
+        return self.n, self.top_im, self.head_im
+
+
 def main():
     fallos = []
 
@@ -34,11 +62,16 @@ def main():
         fallos.append(desc) if not cond else None
         print(("  OK  " if cond else "FALLO ") + desc)
 
+    A.Video = VideoFalso
     app = A.App()
     app.update_idletasks()
     print("ventana %dx%d con %d hojas" % (app.winfo_width(), app.winfo_height(),
                                           len(app.hojas.tabs())))
     chk("se crean las 4 hojas", len(app.hojas.tabs()) == 4)
+    # Las camaras se abren solas al arrancar, sin pulsar nada.
+    bombea(app, 0.4)
+    chk("las camaras se conectan solas al arrancar",
+        isinstance(app.video, VideoFalso) and VideoFalso.instanciados)
     bombea(app)
     chk("el registro recibe lineas", app.txt.get("1.0", "end").strip() != "")
 
@@ -123,6 +156,10 @@ def main():
         app._fov()
         chk("el FOV se calcula con la distancia preguntada",
             abs(app.cfg["head_fov_mm"] - 0.4 * w) < 1e-6)
+        # Y sale solo en Ajustes: si la casilla se queda con el valor viejo, el
+        # siguiente Guardar devuelve el FOV a la medida anterior.
+        chk("el FOV medido se ve tambien en Ajustes",
+            app.campos["head_fov_mm"].get() == "%.2f" % app.cfg["head_fov_mm"])
 
         antes = app.cfg["head_fov_mm"]
         A.simpledialog.askstring = lambda *a, **k: None        # cancelado
@@ -132,7 +169,20 @@ def main():
 
         app.campos["head_fov_mm"].delete(0, "end")
         app.campos["head_fov_mm"].insert(0, "31,5")
+
+        # Maquina.get() cachea hv.Machine con la config de cuando se creo y
+        # solo lo rehace si cambia la IP: por eso un Estacionamiento guardado
+        # no movia nada, la maquina se iba a la posicion de antes.
+        class CocheViejo:
+            cerrado = False
+
+            def close(self):
+                type(self).cerrado = True
+
+        app.maq.mq, app.maq.ip = CocheViejo(), cfg["ip"]
         app.guardar_cfg()
+        chk("guardar Ajustes suelta el coche viejo de la maquina",
+            CocheViejo.cerrado and app.maq.mq is None)
         chk("Ajustes guarda el FOV como numero y no como texto",
             isinstance(guardado.get("head_fov_mm"), float)
             and abs(guardado["head_fov_mm"] - 31.5) < 1e-9)
@@ -140,6 +190,21 @@ def main():
         A.hv.save_cfg, A.hv.load_cfg = save_real, load_real
         A.simpledialog.askstring = ask_real
     app.cfg = load_real()
+
+    # Quitar el punto que se ha marcado en la tabla, no solo el ultimo. Los
+    # reflejos anaden manchas que no son marcas de calibrado, y el punto malo
+    # solia caer en medio de la lista, donde "quitar el ultimo" no llegaba.
+    app.puntos = [(10.0, 10.0, 0.0, 0.0), (20.0, 20.0, 5.0, 5.0),
+                  (30.0, 30.0, 10.0, 10.0)]
+    app._retabla()
+    app.tabla.selection_set(app.tabla.get_children()[1])       # el de en medio
+    app.cal_quita()
+    chk("se quita el punto marcado de la tabla, no solo el ultimo",
+        app.puntos == [(10.0, 10.0, 0.0, 0.0), (30.0, 30.0, 10.0, 10.0)]
+        and len(app.tabla.get_children()) == 2)
+    app.cal_quita()                                            # sin seleccion: el ultimo
+    chk("sin nada marcado quita el ultimo", app.puntos == [(10.0, 10.0, 0.0, 0.0)])
+    app.puntos = []
 
     # Jog: un toque corto da UN paso fino (hold), mantener pasa a continuo
     # (jog_hold) y al soltar se para. Se falsea el panel (para no abrir el
@@ -158,22 +223,9 @@ def main():
         def stop(self):
             self.stops += 1
 
-    class VideoFalso:
-        def __init__(self):
-            self.parar = threading.Event()
-
-        def join(self, timeout=None):
-            pass
-
-        def is_alive(self):
-            return True
-
-        def frame(self):
-            return (0, None, None)
-
     pan = PanFalso()
     app.maq.get = lambda: type("M", (), {"pan": pan})()
-    app.video = VideoFalso()
+    app.video = VideoFalso(app.cfg, app.log)
     app._tarea = lambda fn, *a, **kw: fn(*a)
     for attr in ("_jog_d", "_jog_t", "_jog_p", "_jog_ev"):
         setattr(app, attr, None)
