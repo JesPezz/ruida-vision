@@ -42,6 +42,7 @@ DEFAULTS = {
     "head_fov_mm": 30.0,
     "head_flip_x": 1,
     "head_flip_y": 1,
+    "wasd_flip": 0,
     "cam_offset_mm": [0.0, 0.0],
     "marks": 2,
     "settle": 1.5,
@@ -113,6 +114,21 @@ def grab(cap, n=3):
         if s > score:
             best, score = g, s
     return best
+
+
+def read_gris(cap):
+    """Un fotograma en gris, sin Laplacian y sin elegir el mas enfocado.
+
+    Para lo que se esta VIENDO en vivo. El mas enfocado importa cuando hay que
+    APUNTAR a algo (un clic de calibracion, el centrado fino), no mientras se
+    navega con el teclado: el ojo perdona algo de borroso. Con tres fotogramas y
+    un Laplaciano CV_64F por camara y por vuelta, a 1920x1080 son 16 MB de ida y
+    vuelta por fotograma, seis por vuelta, y eso es el lag y el cuelgue.
+    """
+    ok, f = cap.read()
+    if not ok:
+        raise IOError("fallo de captura de video")
+    return cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
 
 
 # ---------------------------------------------------------------- deteccion
@@ -225,7 +241,10 @@ class Machine:
     def __init__(self, cfg, need_pos=True):
         self.cfg = cfg
         self.pan = ruida.Panel(cfg["ip"]) if need_pos else None
-        if self.pan and not self.pan.handshake():
+        # Si la Ruida no contesta hay que decirlo EN PANTALLA, no solo por
+        # consola: en la ventana no hay consola y el aviso se perdia.
+        self.ok = bool(self.pan and self.pan.handshake())
+        if not self.ok:
             print("AVISO: la Ruida no contesta en 50207; se usara espera fija")
 
     def park(self):
@@ -281,6 +300,54 @@ MS_NUMPAD = {0x48: "+Y", 0x4B: "-X", 0x4D: "+X", 0x47: "-Y"}   # con NumLock off
 LETRAS = {"w": "+Y", "a": "-X", "s": "-Y", "d": "+X"}
 VEL_KEY = "v"
 
+# Que letra va a que eje NO se escribe a mano: sale de la homografia. El origen
+# de la maquina esta en la esquina inferior izquierda, pero eso no dice nada de
+# como esta montada la cenital: si la camara va girada 180 grados, la Y de la
+# maquina cae hacia abajo en la imagen y "arriba" en pantalla es -Y. Con W a +Y
+# el cabezal se va justo al reves de lo que espera el ojo (que es lo que paso:
+# no decia "un eje va mal", decia "va a la inversa", o sea los dos).
+
+
+def _op(d):
+    """El eje contrario: '+X' -> '-X'."""
+    return ("-" if d[0] == "+" else "+") + d[1]
+
+
+def _wasd_de_H(H, w, h, paso=50):
+    """Mapeo de WASD deducido de la homografia, no de los ejes de la maquina.
+
+    Se pregunta a H por donde caen "derecha" y "arriba" EN LA IMAGEN (en una
+    imagen py crece hacia abajo, por eso arriba es restar) y se toma el signo.
+    Asi el mapeo sale siempre de lo que se ve en la cenital, y no hay que volver
+    a tocarlo si un dia se gira o se espeja la camara.
+    """
+    p0 = px_to_mm(H, (w / 2.0, h / 2.0))
+    der = px_to_mm(H, (w / 2.0 + paso, h / 2.0))     # derecha en la imagen
+    arr = px_to_mm(H, (w / 2.0, h / 2.0 - paso))     # arriba en la imagen
+    ex = "+X" if der[0] >= p0[0] else "-X"
+    ey = "+Y" if arr[1] >= p0[1] else "-Y"
+    return {"d": ex, "a": _op(ex), "w": ey, "s": _op(ey)}
+
+
+def _mapa_wasd(cfg, cal, flip=0):
+    """El mapeo que se usa de verdad, con el volteo manual encima.
+
+    Sin homografia todavia (la primera calibracion es justo cuando hace falta)
+    se cae al mapeo por defecto, y `--flip-mov` lo da la vuelta: una linea para
+    desempatar sin tener que adivinar si el giro es de 180 grados (los dos ejes)
+    o un espejo (uno solo).
+    """
+    H = cfg.get("H")
+    # float32 como en fit_homography: perspectiveTransform exige que el pixel y
+    # la matriz sean del mismo tipo.
+    mapa = _wasd_de_H(np.array(H, np.float32), cal[0], cal[1]) if H \
+        else dict(LETRAS)
+    if flip & 1:
+        mapa["d"], mapa["a"] = mapa["a"], mapa["d"]
+    if flip & 2:
+        mapa["w"], mapa["s"] = mapa["s"], mapa["w"]
+    return mapa
+
 
 def _flecha(k, ext):
     """Flecha de OpenCV como '-X'/'+X'/'-Y'/'+Y', o None si no es flecha.
@@ -303,7 +370,7 @@ def _flecha(k, ext):
 _PEND = []
 
 
-def _tecla():
+def _tecla(mapa=None):
     """(codigo, direccion) de la siguiente tecla, o (-1, None) si no hay.
 
     ESTA ES LA PIEZA QUE FALTABA. cv2.waitKey solo ve las teclas si la ventana
@@ -314,7 +381,13 @@ def _tecla():
     leen las dos y gana la primera que conteste, asi que da igual cual tenga el
     foco. El msvcrc devuelve '\x00' o '\xe0' antes del scan code de las
     teclas especiales, y los scan codes suyos son otros que los de OpenCV.
+
+    `mapa` es el de WASD deducido de la homografia; si no se pasa, el de por
+    defecto. Las flechas NO se voltean: sus tablas ya son la direccion que
+    espera el ojo, y dependen solo del teclado, no de como este montada la
+    camara.
     """
+    letras = LETRAS if mapa is None else mapa
     if msvcrt is not None and msvcrt.kbhit():
         c = msvcrt.getwch()
         if c in ("\x00", "\xe0"):
@@ -337,13 +410,13 @@ def _tecla():
             d = MS_SCAN.get(n) or MS_NUMPAD.get(n)
             if d is not None:
                 return (0, d)
-        return (n, LETRAS.get(chr(n).lower()) if n > 0 else None)
+        return (n, letras.get(chr(n).lower()) if n > 0 else None)
     k = cv2.waitKey(30)
     if k == ARROW_EXT:                   # forma extendida de OpenCV
         k2 = cv2.waitKey(10)
         return (k2 if k2 >= 0 else 0, SCAN.get(k2))
     return (k, _flecha(k, False) or
-            (LETRAS.get(chr(k).lower()) if 0 < k < 0x80 else None))
+            (letras.get(chr(k).lower()) if 0 < k < 0x80 else None))
 # Pulsos deadbeat de 1, 20 y 100 ms -> 0.2, 0.44 y 3.4 mm con el perfil lento.
 STEP_MS = (1, 20, 100)
 STEP_MM = (0.2, 0.44, 3.4)
@@ -355,37 +428,70 @@ def _escala(im, alto):
                       interpolation=cv2.INTER_AREA)
 
 
-def mirar(m, top, head, i, n, frames=1, verbose=True):
-    """Las dos camaras a la vez y el cabezal a las flechas, hasta Enter.
+def _px_de_mm(Hinv, mm, cal, shape):
+    """mm de maquina -> pixeles de la cenital, ya escalados al frame que se
+    esta dibujando. Hinv devuelve pixeles de la resolucion con la que se calibro
+    (cal), que no tiene por que ser la del frame actual."""
+    q = cv2.perspectiveTransform(
+        np.array([[[mm[0], mm[1]]]], np.float64), Hinv)[0, 0]
+    return q[0] * shape[1] / cal[0], q[1] * shape[0] / cal[1]
+
+
+def _barra(im, txt, color=(255, 255, 255)):
+    """Franja con el nombre de cada mitad, para saber cual es cual. Sin esto
+    eran dos camaras pegadas sin etiqueta y no se sabia cual era cual."""
+    h = 34
+    cv2.rectangle(im, (0, 0), (im.shape[1], h), (0, 0, 0), -1)
+    cv2.putText(im, txt, (im.shape[1] // 2 - 8 * len(txt), 24),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
+
+
+def _texto(im, txt, org, color, escala=0.7):
+    cv2.putText(im, txt, org, cv2.FONT_HERSHEY_SIMPLEX, escala, (0, 0, 0), 3,
+                cv2.LINE_AA)               # sombra, para que se lea de todo
+    cv2.putText(im, txt, org, cv2.FONT_HERSHEY_SIMPLEX, escala, color, 1,
+                cv2.LINE_AA)
+
+
+def mirar(m, top, head, i, n, flip=0, verbose=True):
+    """Las dos camaras a la vez y el cabezal a W A S D, hasta Enter.
 
     Izquierda: la del cabezal, que es donde la marca tiene que quedar centrada
     y por eso va con la cruz y la ventana de busqueda dibujadas. Derecha: la
     cenital, para ver el contexto y elegir el siguiente punto, con un circulo
-    rojo en donde esta el cabezal ahora (si ya hay homografia guardada).
+    rojo en donde esta el cabezal ahora y una flecha por letra que dice hacia
+    donde lleva cada una (si la W sale hacia abajo, el eje va al reves).
 
-    Las flechas van en pasos deadbeat y 's' cambia de velocidad, asi que se
+    Las flechas van en pasos deadbeat y 'v' cambia de velocidad, asi que se
     llega al punto a base de pasos de 0.2 mm sin depender de LightBurn. Enter
     acepta, q sale.
     """
     win = "calibra punto %d/%d" % (i, n)
-    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-    Hinv, cal = None, (1920, 1080)
+    # Ventana por defecto (autosize) y no WINDOW_NORMAL: con un imshow de tamano
+    # fijo cada vuelta, el backend de Windows reajusta la ventana al de la
+    # imagen y pelea con lo que haga el usuario. Es el mismo patron que usa
+    # click_point, que por eso no da guerra.
+    cv2.namedWindow(win)
+    Hinv = None
+    cal = tuple(m.cfg.get("top_res") or m.cfg["res"])
     if m.cfg.get("H"):
         try:
             Hinv = np.linalg.inv(np.array(m.cfg["H"], float))
-            cal = tuple(m.cfg.get("top_res") or m.cfg["res"])
         except np.linalg.LinAlgError:
             Hinv = None
+    mapa = _mapa_wasd(m.cfg, cal, flip)
     pos, vel, ultima = None, 1, 0.0
     del _PEND[:]
     if verbose:
         print("\npunto %d/%d: mueve con W A S D (o con las flechas), 'v' "
               "cambia de velocidad, Enter acepta, q sale" % (i, n), flush=True)
+        print("  W %s  A %s  S %s  D %s   (%s)" %
+              (mapa["w"], mapa["a"], mapa["s"], mapa["d"],
+               "deducido de la homografia" if Hinv is not None
+               else "sin homografia aun: mapeo por defecto"), flush=True)
     while True:
-        # grab() devuelve el frame mas enfocado en GRIS (el Laplacian va a un
-        # canal), y ahi hay que llevar la imagen a color: si no, el hstack con
-        # el separador de 3 canales peta y los dibujo de color se pierden.
-        img = _escala(cv2.cvtColor(grab(head, frames), cv2.COLOR_GRAY2BGR), 720)
+        # Un fotograma por camara y sin Laplacian: aqui se navega, no se apunta.
+        img = _escala(cv2.cvtColor(read_gris(head), cv2.COLOR_GRAY2BGR), 720)
         # Preguntar la posicion cuesta hasta un timeout entero si la Ruida no
         # contesta, y eso se come el bucle: a 1 Hz no se puede ir haciendo
         # jog. Se pregunta dos veces por segundo y el resto se dibuja con la
@@ -396,14 +502,17 @@ def mirar(m, top, head, i, n, frames=1, verbose=True):
             p = m.pos(0.6)
             if p:
                 pos = p
+        _barra(img, "CABEZAL")
+        _texto(img, "PUNTO %d/%d" % (i, n), (12, 66), (255, 255, 255), 0.7)
         if pos:
-            cv2.putText(img, "%.1f, %.1f mm" % pos, (12, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-            cv2.putText(img, "paso %.1f mm" % STEP_MM[vel], (12, 58),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        cv2.putText(img, "W A S D  mover   v  velocidad   Enter  ok   q  salir",
-                    (12, img.shape[0] - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                    (255, 255, 255), 1)
+            _texto(img, "%.1f, %.1f mm" % pos, (12, 100), (0, 255, 255))
+        elif not m.ok:
+            _texto(img, "SIN RESPUESTA DEL PANEL (50207)", (12, 100), (0, 0, 255))
+        else:
+            _texto(img, "posicion: leyendo...", (12, 100), (0, 165, 255))
+        _texto(img, "paso %.1f mm" % STEP_MM[vel], (12, 130), (0, 255, 255))
+        _texto(img, "W A S D  mover   v  velocidad   Enter  ok   q  salir",
+               (12, img.shape[0] - 14), (255, 255, 255), 0.6)
         h0, w0 = img.shape[:2]
         cx, cy = w0 // 2, h0 // 2
         # ventana util de la busqueda, para ver si la marca cabe dentro
@@ -413,25 +522,34 @@ def mirar(m, top, head, i, n, frames=1, verbose=True):
         cv2.line(img, (cx - 25, cy), (cx + 25, cy), (0, 255, 255), 1)
         cv2.line(img, (cx, cy - 25), (cx, cy + 25), (0, 255, 255), 1)
 
-        gt = _escala(cv2.cvtColor(grab(top, frames), cv2.COLOR_GRAY2BGR), 720)
+        gt = _escala(cv2.cvtColor(read_gris(top), cv2.COLOR_GRAY2BGR), 720)
         if Hinv is not None and pos:
-            # Hinv devuelve pixeles de la resolucion con la que se calibro, que
-            # no tiene por que ser la del frame actual: se escala antes de
-            # dibujar el circulo.
             # perspectiveTransform ya divide por la tercera coordenada y
             # devuelve 2D: no hay que normalizar a mano como con H @ [x,y,1].
-            q = cv2.perspectiveTransform(
-                np.array([[[pos[0], pos[1]]]], np.float64), Hinv)[0, 0]
-            tx = q[0] * gt.shape[1] / cal[0]
-            ty = q[1] * gt.shape[0] / cal[1]
+            tx, ty = _px_de_mm(Hinv, pos, cal, gt.shape)
+            tx, ty = int(tx), int(ty)
             if 0 <= tx < gt.shape[1] and 0 <= ty < gt.shape[0]:
-                cv2.circle(gt, (int(tx), int(ty)), 14, (0, 0, 255), 2)
-                cv2.line(gt, (int(tx) - 20, int(ty)), (int(tx) + 20, int(ty)),
-                         (0, 0, 255), 1)
+                cv2.circle(gt, (tx, ty), 14, (0, 0, 255), 2)
+                cv2.line(gt, (tx - 20, ty), (tx + 20, ty), (0, 0, 255), 1)
+                # Hacia donde lleva cada letra en la cenital. Se ve de un
+                # vistazo si W va hacia abajo, que era el fallo que reportaba.
+                for letra in "wasd":
+                    dj = mapa[letra]
+                    dx, dy = (8.0, 0.0) if dj.endswith("X") else (0.0, 8.0)
+                    if dj.startswith("-"):
+                        dx, dy = -dx, -dy
+                    ax, ay = _px_de_mm(Hinv, (pos[0] + dx, pos[1] + dy),
+                                       cal, gt.shape)
+                    cv2.arrowedLine(gt, (tx, ty), (int(ax), int(ay)),
+                                    (0, 255, 255), 1, tipLength=0.35)
+                    cv2.putText(gt, letra, (int(ax) - 5, int(ay) + 14),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255),
+                                1, cv2.LINE_AA)
+        _barra(gt, "CENITAL")
         gap = np.full((720, 6, 3), 40, np.uint8)
         cv2.imshow(win, np.hstack([img, gap, gt]))
 
-        k, d = _tecla()
+        k, d = _tecla(mapa)
         if k in (ord("q"), 27):
             cv2.destroyWindow(win)
             return "q"
@@ -467,6 +585,12 @@ def cmd_calibrate(a):
     if a.top is not None:
         cfg["top_cam"] = a.top
     cfg["res"] = [a.width, a.height]
+    # Solo para desempatar a mano cuando la homografia aun no existe, que es la
+    # primera vez que se calibra. Luego el sentido sale solo de la H.
+    if a.flip_mov:
+        cfg["wasd_flip"] = cfg.get("wasd_flip", 0) ^ 3
+        print("sentido del movimiento dado la vuelta a mano (quedan los dos "
+              "ejes al reves): revisa en la cenital que W apunte arriba")
     m = Machine(cfg)
     top = open_cam(cfg, "top")
     # La camara del cabezal no la usa la homografia, asi que queda libre para
@@ -482,7 +606,8 @@ def cmd_calibrate(a):
                     # Las dos camaras a la vez y W A S D mueven el cabezal:
                     # no hace falta LightBurn. Con --no-watch se cae al modo
                     # consola de antes (mover con el mando y escribir el X Y).
-                    r = mirar(m, top, head, i + 1, a.points, a.frames)
+                    r = mirar(m, top, head, i + 1, a.points,
+                              cfg.get("wasd_flip", 0))
                     if r == "q":
                         raise KeyboardInterrupt
                 elif input().strip().lower() == "q":
@@ -768,7 +893,8 @@ def cmd_cams(a):
     top, head = open_cam(cfg, "top"), open_cam(cfg, "head")
     # ambas a la misma altura, y el conjunto reducido para que quepa en pantalla
     win = "vision hibrida"
-    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+    # misma logica que en mirar(): ventana por defecto, sin WINDOW_NORMAL
+    cv2.namedWindow(win)
     print("q para salir")
     try:
         while True:
@@ -813,8 +939,15 @@ def test_mirar():
             pulsos.append((d, ms))
 
     class Maq:
-        cfg = {"H": [1, 0, 0, 0, 1, 0, 0, 0, 1], "res": [1920, 1080]}
+        # H que refleja una cenital BIEN MONTADA: la Y de la maquina (arriba)
+        # cae hacia arriba en la imagen, asi que el signo de la fila Y sale
+        # negativo. Con esta H el deduce sale el mapeo de siempre, y 200,100 mm
+        # cae dentro del frame cenital (pixel 400,490), que es lo que hace
+        # aparecer el circulo rojo.
+        cfg = {"H": [[0.5, 0.0, 0.0], [0.0, -0.5, 540.0], [0.0, 0.0, 1.0]],
+               "res": [1920, 1080]}
         pan = Pan()
+        ok = True
 
         def pos(self, t=1.0):
             return (200.0, 100.0)
@@ -851,8 +984,8 @@ def test_mirar():
     # Las dos camaras a la misma altura, lado a lado con el separador.
     assert len(vistas) == n_teclas - 1, (len(vistas), n_teclas)
     assert vistas[0].shape == (720, 1280 + 6 + 1280, 3), vistas[0].shape
-    # Con H identidad, 200,100 mm cae dentro del frame cenital: tiene que
-    # haberse dibujado el circulo rojo.
+    # Con la cenital bien montada, 200,100 mm cae dentro del frame cenital: tiene
+    # que haberse dibujado el circulo rojo.
     assert ((vistas[0][:, :, 2] > 200) & (vistas[0][:, :, 0] < 60)).any(), \
         "no se dibujo el circulo de la posicion del cabezal"
 
@@ -988,8 +1121,59 @@ def test_mirar():
         globals()["msvcrt"] = msvcrt_orig
     assert pulsos == [("-X", 20)], ("scan code tardio", pulsos)
     assert r == "q", r
+
+    # El caso que reporto el usuario: con la cenital girada 180 grados, que es
+    # como esta montada ahora mismo, el deduce tiene que dar los cuatro ejes al
+    # reves SIN que nadie escriba el mapeo a mano. Antes estaba escrito en el
+    # codigo y por eso ya no cuadraba con la camara.
+    class MaqGirada:
+        cfg = {"H": [[-0.5, 0.0, 1920.0], [0.0, 0.5, 0.0], [0.0, 0.0, 1.0]],
+               "res": [1920, 1080]}
+        pan = Pan()
+        ok = True
+
+        def pos(self, t=1.0):
+            return (200.0, 100.0)
+
+    pulsos[:] = []
+    globals()["msvcrt"] = Simple(list("waSDq"))
+    orig = cv2.imshow, cv2.namedWindow, cv2.destroyWindow, cv2.waitKey
+    cv2.namedWindow = cv2.imshow = cv2.destroyWindow = lambda *a, **k: None
+    cv2.waitKey = lambda d: -1
+    try:
+        r = mirar(MaqGirada(), Cap(720, 1280), Cap(1080, 1920), 1, 6,
+                  verbose=False)
+    finally:
+        cv2.imshow, cv2.namedWindow, cv2.destroyWindow, cv2.waitKey = orig
+        globals()["msvcrt"] = msvcrt_orig
+    assert pulsos == [("-Y", 20), ("+X", 20), ("+Y", 20), ("-X", 20)], pulsos
+    assert r == "q", r
+
+    # Y el deduce en si, sin pasar por mirar(): bien montada, girada 180 grados
+    # y espejada solo en horizontal (que es lo que distingue un giro de un
+    # espejo, y por eso --flip-mov va por ejes y no a ojo).
+    Hn = [[0.5, 0.0, 0.0], [0.0, -0.5, 540.0], [0.0, 0.0, 1.0]]
+    Hg = [[-0.5, 0.0, 1920.0], [0.0, 0.5, 0.0], [0.0, 0.0, 1.0]]
+    Hm = [[-0.5, 0.0, 1920.0], [0.0, -0.5, 540.0], [0.0, 0.0, 1.0]]
+    deduce = lambda h: _wasd_de_H(np.array(h, np.float32), 1920, 1080)
+    assert deduce(Hn) == {"d": "+X", "a": "-X", "w": "+Y", "s": "-Y"}, deduce(Hn)
+    assert deduce(Hg) == {"d": "-X", "a": "+X", "w": "-Y", "s": "+Y"}, deduce(Hg)
+    assert deduce(Hm) == {"d": "-X", "a": "+X", "w": "+Y", "s": "-Y"}, deduce(Hm)
+    assert _op("+X") == "-X" and _op("-Y") == "+Y"
+    # Sin homografia sale el mapeo de por defecto, y --flip-mov lo voltea por
+    # ejes encima (1 = derecha/izquierda, 2 = arriba/abajo).
+    sin = {"H": None}
+    assert _mapa_wasd(sin, (1920, 1080)) == LETRAS
+    assert _mapa_wasd(sin, (1920, 1080), 1) == deduce(Hm)
+    assert _mapa_wasd(sin, (1920, 1080), 2) == \
+        {"d": "+X", "a": "-X", "w": "-Y", "s": "+Y"}
+    assert _mapa_wasd(sin, (1920, 1080), 3) == deduce(Hg)
+    assert _mapa_wasd({"H": Hn}, (1920, 1080), 1) == deduce(Hm)
+
     print("teclado: OK (WASD y flechas, ventana de OpenCV y consola, "
           "con el scan code tardio)")
+    print("sentido de WASD: OK (deducido de la H: bien montada, girada 180 y "
+          "espejada; y --flip-mov por ejes)")
     print("mirar: OK (4 ejes por letra y por flecha, v cambia de paso, circulo rojo, q sale)")
 
 
@@ -1119,6 +1303,9 @@ def main():
                    help="escribir X Y a mano en vez de leerlos de la Ruida")
     c.add_argument("--no-watch", action="store_true",
                    help="no mostrar la camara del cabezal como puntero")
+    c.add_argument("--flip-mov", action="store_true",
+                   help="dar la vuelta a W y S a mano, solo si la cenital aun "
+                        "no tiene homografia y el sentido sale raro")
 
     f = sub.add_parser("fov", help="medir el campo de vision de la camara del cabezal")
     f.add_argument("--frames", type=int, default=3)
