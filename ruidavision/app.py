@@ -184,14 +184,16 @@ class Foto(tk.Canvas):
         super().__init__(padre, bg="#0d0d0d", height=320, highlightthickness=0)
         self.al_clic, self.cruz = al_clic, None
         self.foto = None
+        self.detectadas = []
         self.esc = 1.0
         self.ox = self.oy = 0
         self.id = None
         self.bind("<Configure>", lambda e: self._dibujar())
         self.bind("<Button-1>", self._clic)
 
-    def poner(self, bgr):
+    def poner(self, bgr, detectadas=()):
         self.foto, self.cruz, self.id = bgr, None, None
+        self.detectadas = list(detectadas)
         self._dibujar()
 
     def _dibujar(self):
@@ -207,6 +209,7 @@ class Foto(tk.Canvas):
         self.id = self.create_image(self.ox, self.oy, anchor="nw",
                                     image=self._imagen(dw, dh))
         self._pintar_cruz()
+        self._pintar_marcas()
 
     def _imagen(self, w, h):
         rgb = cv2.cvtColor(self.foto, cv2.COLOR_BGR2RGB)
@@ -220,6 +223,29 @@ class Foto(tk.Canvas):
         x, y = self.cruz[0] * self.esc + self.ox, self.cruz[1] * self.esc + self.oy
         for x1, y1, x2, y2 in ((x - 14, y, x + 14, y), (x, y - 14, x, y + 14)):
             self.create_line(x1, y1, x2, y2, fill="#00ff88", width=2, tags="cruz")
+
+    def _pintar_marcas(self):
+        """Lo que ve el detector, dibujado encima de la foto. Sin esto no hay
+        manera de saber si una mancha es una marca o ruido antes de clicar."""
+        self.delete("marcas")
+        for i, (u, v) in enumerate(self.detectadas, 1):
+            x, y = u * self.esc + self.ox, v * self.esc + self.oy
+            r = max(6.0, 5 * self.esc)
+            self.create_oval(x - r, y - r, x + r, y + r, outline="#00ff88",
+                             width=2, tags="marcas")
+            self.create_text(x + r + 2, y - r, text=str(i), fill="#00ff88",
+                             anchor="sw", font=("Segoe UI", 9, "bold"),
+                             tags="marcas")
+
+    def snap(self, x, y, tol=18.0):
+        """El pixel del clic, corregido al centro de la marca detectada mas
+        cercana si esta pegada: el detector lo situa a subpixel, el ojo no."""
+        d = [((x - u) ** 2 + (y - v) ** 2, u, v) for u, v in self.detectadas]
+        if d:
+            dist, u, v = min(d)
+            if dist <= tol * tol:
+                return u, v
+        return x, y
 
     def pixel(self, cx, cy):
         """Pixel REAL de la foto bajo un clic del lienzo."""
@@ -492,6 +518,7 @@ class App(tk.Tk):
 
     # ------------------------------------------------------ hoja "calibrar"
     def _hoja_calibrar(self):
+        self.prompt = ""
         h = ttk.Frame(self.hojas, padding=8)
         self.hojas.add(h, text="  Calibrar  ")
         b = ttk.Frame(h)
@@ -510,6 +537,7 @@ class App(tk.Tk):
         self.ent_fov.insert(0, "%.2f" % self.cfg["head_fov_mm"])
         self.ent_fov.pack(side="left", padx=4)
         ttk.Label(b, text="mm (lo que miden los dos clics)", style="Chico.TLabel").pack(side="left")
+        ttk.Button(b, text="Offset laser", command=self.off_pregun).pack(side="left", padx=(24, 3))
 
         cuerpo = ttk.PanedWindow(h, orient="horizontal")
         cuerpo.pack(fill="both", expand=True, pady=6)
@@ -544,28 +572,43 @@ class App(tk.Tk):
         def f():
             cap = hv.open_cam(self.cfg, which)
             try:
-                return hv.grab(cap, n)
+                g = hv.grab(cap, n)
+                # Marcas SOLO en la cenital: lo que ve el detector encima de la
+                # foto es lo unico que dice que una mancha es una marca. En la
+                # camara del cabezal no significaria nada.
+                d = (hv.find_marks(g, min_area=self.cfg["min_area"],
+                                   max_area=self.cfg["max_area"],
+                                   thr=self.cfg["thr"], merge=6)
+                     if which == "top" else [])
+                return g, [(u, v) for u, v, _ in d]
             finally:
                 cap.release()
         return self._tarea(f, al_terminar=self._foto_lista)
 
     def cal_foto(self):
         self.modo = None
-        self.lbl_cal.configure(text="Foto congelada. Pon el cabezal ENCIMA de la marca "
-                                   "de referencia, mira la foto y pulsa 3.", style="Chico.TLabel")
+        self.prompt = "Foto congelada. Pon el cabezal ENCIMA de una marca y pulsa 3."
         self._congelar("top")
 
     def fov_foto(self):
         self.fovpts, self.modo = [], "fov"
-        self.lbl_cal.configure(text="FOV: haz clic en los DOS extremos de una distancia "
-                                   "que sepas de verdad, y pon arriba los mm que hay "
-                                   "entre ellos. La foto es la del cabezal.")
+        self.prompt = ("FOV: haz clic en los DOS extremos de una distancia que sepas "
+                       "de verdad, y pon arriba los mm que hay entre ellos.")
         self._congelar("head")
 
     def _foto_lista(self, fu):
-        g = fu.result()
+        g, d = fu.result()
         if g is not None:
-            self.foto.poner(g)
+            self.foto.poner(g, d)
+            # El recuento va debajo del aviso: es la respuesta a "las ha visto o
+            # no". Las de la camara del cabezal no son marcas, asi que ahi solo
+            # se cuentan como referencia de que la foto tiene contraste.
+            self.lbl_cal.configure(
+                text="%s\n%d manchas en verde%s"
+                % (self.prompt, len(d),
+                   "  (el clic se pega al centro de la mas cercana)"
+                   if self.modo != "fov" else "  (informativas, no son marcas)"),
+                style="Chico.TLabel")
         if self._volvio and not self.video:
             self.conectar()
         self.sentido()
@@ -578,6 +621,7 @@ class App(tk.Tk):
             if len(self.fovpts) == 2:
                 self._fov()
             return
+        x, y = self.foto.snap(x, y)
         # La posicion se lee en el hilo de trabajo, en el instante del clic: es
         # el pixel del clic CONTRA la posicion de ahi. Guardar la posicion de
         # despues es lo que hacia que los puntos no cuadrasen entre si.
@@ -650,6 +694,52 @@ class App(tk.Tk):
         self._retabla()
         self.lbl_cal.configure(text="quedan %d puntos" % len(self.puntos),
                                style="Chico.TLabel")
+
+    def off_pregun(self):
+        """Offset entre la camara del cabezal y el laser.
+
+        `fine` converge el eje de la CAMARA sobre la marca, y esa es la
+        posicion que se manda a LightBurn. Si el laser no esta en el mismo sitio
+        que el ojo, el laser cae a `d` de la marca y el Print and Cut no
+        registra. La correccion no se deduce de nada: se mide con un disparo.
+
+        Pl = Pc + d, y lo que hay que sumar es -d. Midiendo: se dispara en A, el
+        punto queda en A + d, y al centrarlo con la camara el panel marca P =
+        A + d. De ahi -d = A - P, que es lo que se guarda."""
+        def pedir(txt):
+            v = messagebox.askstring("Offset laser", txt, parent=self)
+            if v is None:
+                return None
+            try:
+                n = [float(x) for x in v.replace(";", ",").split(",") if x.strip()]
+            except ValueError:
+                n = []
+            if len(n) != 2:
+                messagebox.showerror("Offset laser", "Hacen falta dos numeros, X e Y: %r"
+                                     % v, parent=self)
+                return None
+            return n
+
+        A = pedir("1) Coordenada del DISPARO (la que le diste al laser), X Y:")
+        if A is None:
+            return
+        P = pedir("2) Coordenada con el punto ya CENTRADO en el cabezal, X Y:")
+        if P is None:
+            return
+        dx, dy = A[0] - P[0], A[1] - P[1]
+        cfg = hv.load_cfg()
+        cfg["cam_offset_mm"] = [dx, dy]
+        hv.save_cfg(cfg)
+        self.cfg = cfg
+        e = self.campos.get("cam_offset_mm")
+        if e is not None:
+            e.delete(0, "end")
+            e.insert(0, "%.3f; %.3f" % (dx, dy))
+        messagebox.showinfo(
+            "Offset laser",
+            "cam_offset_mm = %.3f, %.3f\n(camara menos laser)\n\n"
+            "Comprobalo con un corte de prueba: si el laser se queda al otro lado "
+            "de la marca, el signo esta invertido." % (dx, dy), parent=self)
 
     def _fov(self):
         (x1, y1), (x2, y2) = self.fovpts

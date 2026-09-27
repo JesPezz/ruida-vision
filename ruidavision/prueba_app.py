@@ -76,6 +76,11 @@ def main():
     f._clic(ev(-500, -500))
     chk("el clic se queda dentro de la foto", 0 <= clics[-1][0] < 1920
         and 0 <= clics[-1][1] < 1080)
+    # El detector dice donde esta el centro de la mancha; el clic se pega ahi si
+    # esta cerca. Lejos de toda marca, el clic vale lo que dice el raton.
+    f.detectadas = [(x + 12.0, y), (300.0, 900.0)]
+    chk("el clic se pega al centro de la marca cercana", f.snap(x + 9, y + 3) == (x + 12.0, y))
+    chk("un clic lejos de toda marca se queda donde esta", f.snap(20.0, 20.0) == (20.0, 20.0))
 
     # El sentido de WASD sale de la homografia real, no de una tabla a mano.
     mapa = A.hv._mapa_wasd(cfg, app.cal_res)
