@@ -1,14 +1,66 @@
 # Notas para la próxima sesión
 
-Estado: **v1.6, la v1.5 más los cuatro ajustes que salieron de usarla en la máquina.**
+Estado: **v1.7, la v1.6 más los siete ajustes que salieron de usarla en la máquina.**
 Todo lo de abajo está verificado (`py -u hybrid_vision.py test`, `python ruida.py test`,
-`/root/venv/bin/python -m ruidavision.prueba_app` → 0 fallos). Lo que queda es lo que
-solo se puede comprobar con la máquina delante, y está al final.
+`/root/venv/bin/python -m ruidavision.actualizar test`, y
+`/root/venv/bin/python -m ruidavision.prueba_app` → 0 fallos de 61 comprobaciones).
+Lo que queda es lo que solo se puede comprobar con la máquina delante, y está al final.
 
-## 0. Lo de esta versión (v1.6)
+## 0. Lo de esta versión (v1.7)
+
+1. **El paso es un número en mm, no un desplegable** (`self.paso_mm`, `lbl_paso`,
+   `_pon_paso`, `_cambia_paso`): `-` y `+` lo mueven en saltos de 0,1 mm entre
+   `PASO_MIN=0.1` y `PASO_MAX=10.0`. El pulsado lo traduce `ms_de_paso()` en
+   hybrid_vision.py, que interpola los tres puntos medidos (0,2/0,44/3,4 mm),
+   extrapola con la pendiente del último tramo y nunca baja de 1 ms: por debajo la
+   Ruida no distingue un pulso de un keyup, así que un paso más fino es
+   indistinguible de "no mover". El `jog` de la CLI **no** cambia: sigue con su
+   ciclo de tres pasos, es otro uso.
+2. **Botones con icono y leyenda flotante** (`ToolTip` + `boton()`). La leyenda es
+   un `tk.Label` que se coloca con `place` a los 600 ms de parar el ratón, y se
+   esconde con `place_forget()`. Ojo: `withdraw()`/`deiconify()` son de `Wm`, y un
+   Label no es toplevel — con `withdraw()` reventaba al construir la app.
+3. **La botonera del log va en `grid`**, no en un `pack` encadenado: los botones de
+   arriba del registro ya no se comían la última línea del log.
+4. **Calibrar reparte los tres visores** (`_marco` con `weight`): las dos cámaras
+   en vivo en la fila de arriba, la foto congelada debajo y a todo lo ancho.
+   Medido en la prueba: vivos 381×388 y 388×388, congelada 809×212.
+5. **Filtro de marcas común a la app y a la CLI** (`area_trabajo` y
+   `marcas_utiles` en hybrid_vision.py). Fuera del área de trabajo (500×400 mm) no
+   son marcas: son tags o reflejos, y además su mm viene de una homografía
+   extrapolada (un tag en el borde daba 599 mm en una cama de 500×400). Se
+   descartan **antes** de elegir la pareja; a quien le pase le avisa de cuántas se
+   dejaron fuera. `cmd_run` y la hoja Marcas usan el mismo helper: el criterio no
+   puede ser distinto según por dónde se entre.
+6. **Print and Cut sin portapapeles** (`detectar` → `mover_marca` → `_fin_punto`):
+   `detectar` no mueve el cabezal, deja los dos puntos a la vista; `➜` va al
+   punto 1, se lee la posición en grande y se anota a mano en LightBurn; `➜` otra
+   vez va al punto 2 y avisa de que el offset de LightBurn debe quedar
+   desactivado. El mismo botón va cambiando de texto ("Mover 1" → "Mover 2" → "➜").
+   La posición que se enseña es la del cabezal **más** `cam_offset_mm` en el punto
+   1 (donde se pulsa el botón en la app) y la de la máquina en el punto 2 (donde se
+   anota en LightBurn).
+7. **El instalador se ejecuta** (`actualizar.lanzar` + `_orden`): `cmd /c ping -n 4
+   127.0.0.1 >nul && "inst.exe" /CLOSEAPPLICATIONS`, con `DETACHED_PROCESS |
+   CREATE_NO_WINDOW` y `close_fds=True`. Sin despegarse del proceso no se puede
+   cerrar la app antes de ejecutar. Antes de lanzar se registra ruta y tamaño del
+   `.exe`, que es el dato que separa "falló la red" de "falló el arranque".
+   `lanzar` avisa y no hace nada si el fichero no está.
+
+### Bugs que salieron al probar esto
+
+- `pick_pair` devuelve la **pareja** `(a, b)`. Envolverla en lista dejaba una tupla
+  dentro y petaba al desempaquetar. Lo caza la prueba de la app.
+- `boton()` con `width` explícito reventaba por `multiple values for keyword`;
+  ahora el `width=3` por defecto se pisa con `dict({"width": 3}, **kw)`.
+- `ToolTip` con `withdraw()`: método de `Wm`, no existe en `Label`.
+- `os.path.getsize(ruta)` en el log de la descarga reventaba si el fichero no llegó
+  a crearse; ahora se registra 0 bytes en vez de morir.
+
+## 1. Lo de la v1.6
 
 1. **`-` y `+` cambian el paso del toque** (`_cambia_paso`, tabla `PASOS` en app.py),
-   sin soltar el WASD. El desplegable se queda.
+   sin soltar el WASD. En la v1.7 el desplegable desaparece y el paso pasa a mm.
 2. **Calibrar con los tres visores a la vez**: `self.vivos = {hoja: (cenital, cabezal)}`
    y `_pintar` pinta solo los de la hoja visible. La foto congelada (`self.foto`) es un
    `Foto` aparte, debajo. Se elimina `_visor_cal` y con ella `hay_foto` (ya no lo leía
@@ -113,6 +165,21 @@ cabe en pantalla.
 
 ## 5. Pendiente de máquina (no se puede comprobar sin ella)
 
+Lo de la v1.7, en este orden:
+
+- **El flujo de Print and Cut, a pelo**: centrar la plantilla, `◎ Detectar los dos
+  puntos`, `➜` al punto 1, anotar en LightBurn, `➜` al punto 2, anotar. La posición
+  que sale en grande tiene que coincidir con la que marca el cabezal ahí. Luego:
+  en LightBurn, offset **desactivado**.
+- **`-` y `+` con el cabezal en la mano**: 0,1 mm se nota como un roce, 10 mm se
+  nota de golpe, y ni un paso se queda sin mover.
+- **El instalador de verdad**: Ajustes → Actualizar, y comprobar que la app se
+  cierra, aparece el instalador y arranca. Antes solo se descargaba.
+- Las leyendas de los botones: que se lean y que no se queden puestas al mover el
+  ratón a otro botón.
+
+Lo de antes, igual:
+
 - `py hybrid_vision.py calibrate --park 20,20` y mirar que **W va hacia arriba** en la
   cenital. Con la `H` actual tiene que salir así solo; si no, `--flip-mov`.
 - `run --iters 1` con el **láser apagado** para comprobar los signos `head_flip_x`/`y`.
@@ -137,12 +204,13 @@ se descarga sin sesión.
 ## Cómo probar
 
 ```
-py hybrid_vision.py test                                  # 13 líneas, sin máquina
+py hybrid_vision.py test                                  # deteccion, ROI, filtro, paso y teclado, sin máquina
 python ruida.py test                                      # protocolo del panel, sin máquina
 py hybrid_vision.py calibrate --park 20,20                # ventana con las 2 cámaras
 
 # App de escritorio (en la Pi hace falta xvfb-run: no tiene escritorio real)
-/root/venv/bin/python -m ruidavision.prueba_app           # ~35 comprobaciones de GUI y jog
+/root/venv/bin/python -m ruidavision.prueba_app           # 61 comprobaciones de GUI y jog
+/root/venv/bin/python -m ruidavision.actualizar test      # 13 del descargador y el arranque
 ```
 
 `prueba_app.py` falsea `hv.save_cfg` de **toda** la corrida: antes, una prueba que se

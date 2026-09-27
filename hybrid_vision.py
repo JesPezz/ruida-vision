@@ -428,6 +428,27 @@ def _tecla(mapa=None):
 # Pulsos deadbeat de 1, 20 y 100 ms -> 0.2, 0.44 y 3.4 mm con el perfil lento.
 STEP_MS = (1, 20, 100)
 STEP_MM = (0.2, 0.44, 3.4)
+PASO_MIN, PASO_MAX = 0.1, 10.0       # lo que se puede pedir con -/+
+
+
+def ms_de_paso(mm):
+    """Cuantos ms de pulsado deadbeat dan `mm` de desplazamiento.
+
+    Al reves de STEP_MS/STEP_MM: la app deja elegir el paso en mm, como
+    LightBurn, y el control solo entiende pulsos. Se interpola entre los tres
+    puntos medidos y se extrapola con la pendiente del tramo final, con un tope
+    de 1 ms: por debajo la Ruida no distingue pulsos de keyup, asi que un paso
+    mas fino es indistinguible de "no mover"."""
+    mm = max(PASO_MIN, min(PASO_MAX, float(mm)))
+    ms = STEP_MS[0]
+    for i in range(len(STEP_MM) - 1):
+        a, b = STEP_MM[i], STEP_MM[i + 1]
+        if mm <= b:
+            f = (mm - a) / (b - a)
+            return max(1, int(round(STEP_MS[i] + f * (STEP_MS[i + 1] - STEP_MS[i]))))
+    # por encima del ultimo punto medido, misma pendiente que 0.44->3.4
+    pend = (STEP_MS[-1] - STEP_MS[-2]) / (STEP_MM[-1] - STEP_MM[-2])
+    return max(1, int(round(STEP_MS[-1] + pend * (mm - STEP_MM[-1]))))
 
 
 def _escala(im, alto):
@@ -695,6 +716,35 @@ def pick_pair(marks):
                key=lambda p: math.dist(p[0][0], p[1][0]))
 
 
+def area_trabajo():
+    """El area de trabajo en mm, como (x0, y0, x1, y1): la caja de la Ruida.
+
+    La homografia se ajusta con puntos repartidos por ahi, y fuera de la caja
+    sus mm son extrapolacion: no son medidas, son suposiciones."""
+    x0, x1, y0, y1 = ruida.Panel.SAFE
+    return (x0, y0, x1, y1)
+
+
+def marcas_utiles(found, H, roi_mm=None):
+    """Reparte las manchas detectadas en (dentro, fuera) del area de trabajo.
+
+    Cada marca sale como (mm, px). Lo de descartar ANTES de elegir el par es
+    lo que quita los puntos fantasma: si se eligiera la pareja mas separada
+    primero, el par seria el tag de calibracion y la mancha de un borde, no las
+    dos marcas del material. Una mancha fuera de la caja es un tag o un
+    reflejo, y ademas su mm viene de una homografia extrapolada (un tag en el
+    borde daba 599 mm en una cama de 500x400)."""
+    if roi_mm and len(roi_mm) == 4:
+        x0, y0, x1, y1 = roi_mm
+    else:
+        x0, y0, x1, y1 = area_trabajo()
+    dentro, fuera = [], []
+    for u, v, area in found:
+        mk = (px_to_mm(H, (u, v)), (u, v))
+        (dentro if x0 <= mk[0][0] <= x1 and y0 <= mk[0][1] <= y1 else fuera).append(mk)
+    return dentro, fuera
+
+
 def cmd_run(a):
     cfg = load_cfg()
     if "H" not in cfg:
@@ -707,6 +757,9 @@ def cmd_run(a):
               if a.roi else cfg.get("roi_mm"))
     if roi_mm and len(roi_mm) != 4:
         sys.exit("--roi toma 4 numeros: x0,y0,x1,y1 en mm de maquina")
+    # Sin --roi manda el area de trabajo: es la zona donde la homografia esta
+    # medida, y fuera de ella sus mm son suposiciones, no medidas.
+    roi_mm = tuple(roi_mm) if roi_mm else area_trabajo()
     m = Machine(cfg)
     top = open_cam(cfg, "top")
     head = open_cam(cfg, "head")
@@ -737,39 +790,22 @@ def cmd_run(a):
                   "marca solida (disco relleno, o disco con la cruz en blanco "
                   "dentro)." % (len(found), marks_wanted, BED_PNG))
         # (mm, px) van juntos: al reordenar marcas hay que mover los dos
-        marks = [(px_to_mm(H, (u, v)), (u, v)) for u, v, _ in found]
-        # La caja de la maquina es la ROI por defecto. Una homografia ajustada
-        # con puntos en una zona extrapola mal fuera de ella: un tag de
-        # calibracion cerca del borde de la imagen sale en mm que no existen
-        # (599, 412 en una cama de 500x400). Mover ahi es un ValueError, y si
-        # el tope fuera mayor seria el cabezal contra un tope de recorrido.
-        # --roi solo la estrecha, para quedarse con las dos marcas del
-        # material en una cama llena de tags de calibracion.
-        if roi_mm:
-            x0, y0, x1, y1 = roi_mm
-        else:
-            # SAFE va como (x0, x1, y0, y1), no como el ROI. Ojo al desempaquetar.
-            x0, x1, y0, y1 = ruida.Panel.SAFE
-            roi_mm = (x0, y0, x1, y1)
-        dentro, fuera = [], []
-        for mk in marks:
-            (dentro if x0 <= mk[0][0] <= x1 and y0 <= mk[0][1] <= y1
-             else fuera).append(mk)
+        dentro, fuera = marcas_utiles(found, H, roi_mm)
         if fuera:
-            print("fuera de %s: %d marcas %s"
+            print("fuera del area de trabajo %s: %d manchas descartadas %s"
                   % (roi_mm, len(fuera),
                      [(round(mk[0][0], 1), round(mk[0][1], 1)) for mk in fuera]))
         if a.roi:
-            print("ROI %s: %d de %d marcas dentro" % (roi_mm, len(dentro), len(marks)))
+            print("ROI %s: %d de %d manchas dentro" % (roi_mm, len(dentro), len(found)))
         marks = dentro
         if len(marks) < marks_wanted:
-            sys.exit("quedan %d marcas de las %d pedidas dentro de %s.\n"
-                     "Lo normal es que falten por(tags de calibracion de por "
-                     "medio): acota con --roi x0,y0,x1,y1 en mm.\n"
+            sys.exit("dentro del area de trabajo %s quedan %d manchas de las %d "
+                     "pedidas.\nLo normal es que falten por tags de calibracion de "
+                     "por medio): acota con --roi x0,y0,x1,y1 en mm.\n"
                      "Si las que sobran estan FUERA de la caja, la homografia "
                      "extrapola mal ahi: repite 'calibrate' con puntos "
                      "repartidos por TODA la cama, esquinas incluidas."
-                     % (len(marks), marks_wanted, (x0, y0, x1, y1)))
+                     % (roi_mm, len(marks), marks_wanted))
         if marks_wanted == 2:
             a_, b_ = pick_pair(marks)
             marks = [a_, b_]
@@ -1247,6 +1283,24 @@ def cmd_test(a):
     assert not dentro((599.073, 412.221)), "fuera de la caja tiene que salir"
     assert not dentro((477.532, -4.142)), "y por Y negativa tambien"
     print("filtro de caja: OK (dentro 250,200 entra; 599,412 y 477,-4.1 salen)")
+
+    # El filtro de verdad, con la H sintetica de arriba: mm = 0.12u+0.03v+40,
+    # -0.02u+0.11v+25. (0,0) cae en 40,25 mm (dentro de la cama de 500x400) y
+    # (4000,0) en 520,-55 (fuera). El ROI explicito manda sobre la caja.
+    dentro, fuera = marcas_utiles([(0, 0, 900), (4000, 0, 800)], T)
+    assert len(dentro) == 1 and len(fuera) == 1, (dentro, fuera)
+    assert dentro[0][0] == (40.0, 25.0) and dentro[0][1] == (0, 0), dentro
+    d2, f2 = marcas_utiles([(0, 0, 900), (4000, 0, 800)], T, (0, 0, 10, 10))
+    assert not d2 and len(f2) == 2, (d2, f2)
+    print("marcas_utiles: OK (la caja descarta el tag de fuera; el ROI manda)")
+
+    # El paso se pide en mm y sale en ms: los tres puntos medidos, el recorte a
+    # 0.1-10 mm y el minimo de 1 ms (por debajo la Ruida no distingue el pulso).
+    assert ms_de_paso(0.1) == ms_de_paso(0.0) >= 1, "0 y 0.1 valen lo mismo"
+    assert ms_de_paso(3.4) == STEP_MS[-1], "3.4 mm es un punto medido"
+    assert ms_de_paso(0.44) == STEP_MS[1], "0.44 mm es un punto medido"
+    assert ms_de_paso(10.0) > ms_de_paso(3.4) > ms_de_paso(0.1), "mas mm, mas ms"
+    print("paso mm->ms: OK (puntos medidos, recorte 0.1-10 y minimo de 1 ms)")
 
     # El mapeo de las flechas falla en silencio: si una tecla no esta
     # reconocida el cabezal no se mueve y no sale ningun error. Por eso se

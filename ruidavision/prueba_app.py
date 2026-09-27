@@ -78,10 +78,14 @@ def hv_bed_temp(app):
 
 def main():
     fallos = []
+    hechas = []
 
     def chk(desc, cond):
+        hechas.append(desc)
         fallos.append(desc) if not cond else None
-        print(("  OK  " if cond else "FALLO ") + desc)
+        # flush: sin el, un tramo entero del registro se pierde cuando cv2
+        # abre su ventana, y un fallo parece no existir.
+        print(("  OK  " if cond else "FALLO ") + desc, flush=True)
 
     A.Video = VideoFalso
     app = A.App()
@@ -292,18 +296,72 @@ def main():
     un_frame()
     chk("solo se pinta la hoja que se ve",
         antes == [getattr(l, "img", None) for l in app.vivos[app.i_vivo]])
+    # El reparto de los tres visores: los dos en vivo no salen mas pequeños que
+    # la foto congelada, que era justo lo que se quejaba.
+    app.hojas.select(app.i_cal)
+    app.update()
+    top, head = app.vivos[app.i_cal]
+    v_alto, h_alto = top.winfo_height(), head.winfo_height()
+    f_alto = app.foto.winfo_height()
+    chk("los visores en vivo ya no son una franja ilegible (%dx%d, foto %dx%d)"
+        % (top.winfo_width(), v_alto, app.foto.winfo_width(), f_alto),
+        min(v_alto, h_alto) > 80 and v_alto == h_alto)
+    chk("la foto congelada ya no se come la hoja", f_alto > 0
+        and v_alto / max(f_alto, 1) > 0.7)
+    # 5% de margen: la barra de la hoja se come unos pixeles de una columna.
+    anchos = sorted((top.winfo_width(), head.winfo_width()))
+    chk("los tres visores se reparten el ancho (%d/%d, foto %d)"
+        % (anchos[0], anchos[1], app.foto.winfo_width()),
+        anchos[1] - anchos[0] <= 0.05 * anchos[1]
+        and app.foto.winfo_width() > anchos[1])
 
-    # - y + eligen el paso de toque sin soltar el WASD.
-    chk("el desplegable arranca en el paso de medio", app.cmb.current() == 1)
-    app._cambia_paso(-99)
-    chk("el paso mas fino es el ultimo", app.cmb.current() == 0)
-    app._cambia_paso(1)
-    app._cambia_paso(1)
-    chk("+ sube el paso de toque", app.cmb.current() == 2)
+    # Los botones llevan icono y leyenda flotante (punto 3).
+    def todos(w, acc=None):
+        acc = [] if acc is None else acc
+        for c in w.winfo_children():
+            acc.append(c)
+            todos(c, acc)
+        return acc
+    cosas = todos(app)
+    iconos = [w for w in cosas if w.winfo_class() == "TButton"
+              and len(w.cget("text")) <= 3]
+    tips = [w for w in cosas if isinstance(w, A.ToolTip)]
+    chk("los botones de las hojas son iconos con leyenda flotante",
+        len(iconos) >= 6 and len(tips) >= len(iconos)
+        and all(len(t.cget("text")) > 6 for t in tips))
+    t0 = tips[0]
+    # La hoja de la leyenda puede estar oculta (esta comprueba el gestor, no
+    # el pixel: asi vale para los 30 botones sin desocultar 4 hojas).
+    ev = type("E", (), {"x_root": 10, "y_root": 20})()
+    t0.mostrar(ev)
+    chk("la leyenda no sale hasta que el raton se para",
+        t0.winfo_manager() != "place" and t0._t is not None)
+    t0._enseguida()
+    app.update()
+    chk("la leyenda sale al parar el raton encima",
+        t0.winfo_manager() == "place")
+    t0.mover(ev)
+    chk("la leyenda sigue al raton mientras sale", t0.winfo_manager() == "place")
+    t0.ocultar()
+    app.update()
+    chk("la leyenda se va al salir el raton",
+        t0.winfo_manager() != "place" and t0._t is None)
+
+    # - y + eligen el paso de toque sin soltar el WASD, en saltos de 0.1 mm.
+    chk("el paso de toque es un numero, no un desplegable",
+        app.paso_mm == 0.5 and "0.5 mm" in app.lbl_paso.cget("text")
+        and not hasattr(app, "cmb"))
+    app._cambia_paso(-1)
+    chk("- baja el paso de 0.1", app.paso_mm == 0.4)
+    app._cambia_paso(2)
+    chk("+ sube el paso de 0.1", app.paso_mm == 0.6)
     app._cambia_paso(99)
-    chk("el paso mas gordo es el primero",
-        app.cmb.current() == len(A.hv.STEP_MM) - 1)
+    chk("el paso no se sale del tope de arriba",
+        app.paso_mm == A.hv.PASO_MAX)
     app._cambia_paso(-99)
+    chk("el paso no se sale del tope de abajo",
+        app.paso_mm == A.hv.PASO_MIN)
+    app._pon_paso(0.5)
     app.hojas.select(app.i_vivo)
 
     # El panel de la Ruida escucha en un puerto fijo: si el run de Marcas lo
@@ -331,6 +389,46 @@ def main():
         A.hv.BED_PNG, A.COORDS = app.__dict__.pop("_bed_real")
         os.unlink(bed)
         os.unlink(coo)
+
+    # El flujo de Print and Cut: detectar (sin mover) deja los dos puntos a la
+    # vista, y el boton Mover va al primero y luego al segundo. Nada de copiar
+    # y pegar: el usuario lee la posicion del cabezal en pantalla.
+    chk("sin detectar no hay puntos que mover", app.marcas2 == []
+        and "disabled" in str(app.btn_mover.state()))
+    fake = [(1.5, 2.5), (61.0, 41.0)]
+    # H identidad: px == mm, y asi las cifras del test son las que se ven.
+    app.cfg["H"] = np.eye(3, dtype=np.float32).tolist()
+    found = [(10, 10, 900), (20, 20, 800), (600, 900, 700), (30, 30, 600)]
+    app._tarea = lambda fn, *a, **kw: fn(*a)
+    app._ok = lambda p: True
+    app._marca_a = lambda mm, i: fake[i]                 # sin Ruida de verdad
+    marcas, aviso = app._elige_marcas(found)
+    chk("solo se quedan las manchas dentro del area de trabajo", len(marcas) == 2)
+    chk("las de fuera se dicen, no se esconden",
+        aviso != "" and "fuera" in aviso.lower())
+    app.marcas2 = marcas
+    app._boton_mover()
+    chk("el boton ofrece mover al punto 1",
+        "Mover 1" in app.btn_mover.cget("text"))
+    app.mover_marca()
+    app._fin_punto(0, fake[0])
+    chk("tras mover a 1 el boton ofrece el punto 2",
+        "Mover 2" in app.btn_mover.cget("text"))
+    chk("la posicion del punto 1 se lee en pantalla",
+        "PUNTO 1" in app.lbl_punto.cget("text")
+        and "1.500" in app.lbl_punto.cget("text"))
+    app.mover_marca()
+    app._fin_punto(1, fake[1])
+    chk("la posicion del punto 2 se lee en pantalla",
+        "PUNTO 2" in app.lbl_punto.cget("text")
+        and "61.000" in app.lbl_punto.cget("text"))
+    chk("en el punto 2 se avisa del offset de LightBurn",
+        "offset" in app.lbl_aviso_marca.cget("text").lower())
+    app._boton_mover()
+    chk("acabados los dos puntos no hay mas que mover",
+        "2" not in app.btn_mover.cget("text"))
+    app.marcas2, app.i_marca = [], 0
+    app._boton_mover()
 
     # La descarga de la OTA se armaba con os.path.dirname del nombre del
     # adjunto, que en un nombre suelto es "", dejando una ruta RELATIVA: la
@@ -385,7 +483,7 @@ def main():
     app._suelta("+X")
     bombea(app, 0.3)
     chk("un toque da un solo paso fino (+X)",
-        pan.holds == [("+X", A.hv.STEP_MS[app.cmb.current()])])
+        pan.holds == [("+X", A.hv.ms_de_paso(app.paso_mm))])
     chk("un toque no arranca el continuo", not pan.jogs)
 
     app._toque("+Y")                     # mantener: pasa a continuo
@@ -408,7 +506,10 @@ def main():
     # es lo que se ve al terminar esta prueba sin que se quede colgada.
     chk("el pool de trabajo queda cerrado", app.pool._shutdown is True)
     A.hv.save_cfg = save_real          # ya nadie puede escribir el calib.json
-    print("app: %d fallos %s" % (len(fallos), fallos or ""))
+    # el total tambien: si el registro se pierde a medias, el numero dice si las
+    # comprobaciones llegaron a correr todas.
+    print("app: %d fallos de %d comprobaciones %s"
+          % (len(fallos), len(hechas), fallos or ""))
     return 1 if fallos else 0
 
 

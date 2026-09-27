@@ -105,10 +105,42 @@ def descargar(url, destino=None):
     yield None                      # None = descarga terminada
 
 
-def lanzar(ruta):
-    """Ejecuta el instalador en silencio. El instalador cierra la app."""
-    subprocess.Popen([ruta, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
-                     close_fds=True)
+ARGUMENTOS = ("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
+              "/CLOSEAPPLICATIONS")
+
+
+def _orden(ruta, esperar=4):
+    """La linea que arranca el instalador: un cmd que espera y luego lo lanza.
+
+    Va en su propia funcion para que el autocomprobado pueda mirar la orden sin
+    ejecutar nada. La cadena se monta a mano y NO con list2cmdline: ese entrecomilla
+    los redirectiones y el `&&`, y el cmd se lo tomaria todo por nombre de
+    programa."""
+    exe = '"%s"' % ruta if (" " in ruta or '"' in ruta) else ruta
+    return 'cmd /c ping -n %d 127.0.0.1 >nul && %s %s' % (
+        esperar, exe, " ".join(ARGUMENTOS))
+
+
+def lanzar(ruta, esperar=4):
+    """Ejecuta el instalador DESPUES de que la app se cierre.
+
+    El sintoma reportado era "descarga, cierra la app y no ejecuta el
+    instalador", y la causa es que se lanzaba con la app todavia viva: Inno
+    Setup ve el ejecutable abierto, no puede sustituirlo y en modo silencioso
+    no hay nadie a quien preguntarselo, asi que se va sin hacer nada y sin
+    avisar. Con `/CLOSEAPPLICATIONS` de los argumentos, Inno la cierra el
+    mismo, y el arranque se hace desde un `cmd` desligado que primero espera
+    unos segundos a que esta ventana desaparezca de verdad.
+
+    El `cmd` es la pieza que hace que sobreviva: un Popen que cuelga de esta
+    app muere con ella, y lo que hacia falta era algo que siguiera vivo. Se
+    lanza DETACHED y sin consola para que no aparezca una ventana negra."""
+    if not os.path.exists(ruta):
+        raise IOError("no esta el instalador en %s" % ruta)
+    flags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) \
+        | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    return subprocess.Popen(_orden(ruta, esperar), close_fds=True,
+                            creationflags=flags)
 
 
 def main(a):
@@ -161,8 +193,22 @@ def test():
     chk("la peticion lleva User-Agent", bool(p.get_header("User-agent")), True)
     chk("la peticion pide JSON de GitHub",
         p.get_header("Accept"), "application/vnd.github+json")
+    # lanzar(): el sintoma era "cierra la app y no ejecuta el instalador", y
+    # venía de lanzarlo con la app viva. Se comprueba la orden, no el proceso.
+    ruta_ok = os.path.join(tempfile.gettempdir(), "instalador_de_prueba.exe")
+    open(ruta_ok, "wb").close()
+    try:
+        lanzar("/no/existe/instalador.exe")
+        chk("lanzar avisa si el instalador no esta", "no lanzo", "IOError")
+    except IOError as e:
+        chk("lanzar avisa si el instalador no esta", os.path.basename(str(e)),
+            "instalador.exe")
+    chk("el arranque espera a que la app se cierre",
+        "ping -n 4 127.0.0.1 >nul &&" in _orden(ruta_ok), True)
+    chk("el instalador va con /CLOSEAPPLICATIONS",
+        all(a in _orden(ruta_ok) for a in ARGUMENTOS), True)
     print("actualizador: %d comprobaciones OK" % ok)
-    return 0 if ok == 10 else 1
+    return 0 if ok == 13 else 1
 
 
 if __name__ == "__main__":

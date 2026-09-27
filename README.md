@@ -10,6 +10,37 @@ hybrid_vision.py  cámaras, detección de marcas, homografía y flujo Print and 
 calib.json        se crea solo en `calibrate` (cámaras, FOV, homografía H, puntos)
 ```
 
+## Qué cambió en la v1.7
+
+Siete ajustes que salieron de usar la v1.6 con la máquina delante:
+
+- **El paso se pide en milímetros, no en nombres.** `-` y `+` lo suben y lo bajan
+  en saltos de **0,1 mm** entre 0,1 y 10, y el número se ve siempre junto al
+  botón, como en LightBurn. Desapareció el desplegable: pulsabas `-` con la mano
+  en el teclado y tenías que soltar WASD para tocarlo. La Ruida, en cambio, solo
+  entiende pulsos: `ms_de_paso()` traduce mm a
+
+  milisegundos de pulsado con los tres puntos medidos (0,2 / 0,44 / 3,4 mm) y un
+  mínimo de 1 ms, por debajo del cual la controladora no distingue el pulso.
+- **Los botones llevan icono y una leyenda flotante** que sale al parar el ratón
+  encima. Con iconos solos no se sabía qué era qué.
+- **Calibrar reparte la hoja**: las dos cámaras en vivo ocupan la parte de arriba
+  y la foto congelada, la de abajo, en una fila a todo lo ancho. Antes la
+  congelada se comía la hoja y las cámaras en vivo salían en una franja.
+- **Solo se marcan los puntos que están en la cama.** Las manchas que caen fuera
+  del área de trabajo (500 × 400 mm) son tags de calibración o reflejos: se
+  cuentan y se dicen, pero no se marcan, y **el filtro es el mismo en la app y en
+  `hybrid_vision.py`** (`marcas_utiles`). Es lo que evita que el par elegido sea un
+  tag y una mancha del borde en vez de las dos marcas del material.
+- **Print and Cut sin copiar y pegar.** Con los dos puntos a la vista, el botón
+  `➜` va al primero; se anota a mano la posición que da el cabezal; vuelve a
+  pulsar y va al segundo. El paso 2 avisa de que el offset de LightBurn debe
+  quedar **desactivado**, porque aquí ya se ha tenido en cuenta.
+- **La actualización se ejecuta de verdad.** Descargar el `.exe` ya no se quedaba
+  en el disco: la app se cierra (`/CLOSEAPPLICATIONS`), espera a salir y arranca el
+  instalador (`actualizar.lanzar`, con `DETACHED_PROCESS` para que no se quede
+  colgada esperando).
+
 ## Qué cambió en la v1.6
 
 Lo que se arregló en esta versión, todo a raíz de la usar en la máquina:
