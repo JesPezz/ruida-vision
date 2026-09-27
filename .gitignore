@@ -11,4 +11,7 @@ dist/
 *.ico
 # Datos que escribe la app en su carpeta
 app.log
-RuidaVision/
+build.log
+# Carpeta del ejecutable, solo en la raiz: sin la / tambien se lleva por delante
+# el paquete ruidavision/ (en Windows ignorecase no distingue RuidaVision).
+/RuidaVision/
