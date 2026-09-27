@@ -285,7 +285,10 @@ class App(tk.Tk):
         self._pid = None
         self._ok = None
         self.pos = None
-        self._rep = None
+        self._jog_d = None               # direccion de jog en curso
+        self._jog_t = None               # la pulsacion se esta volviendo continua
+        self._jog_p = None               # parada pendiente (debounce del repeat)
+        self._jog_ev = None              # Event del continuo en curso
 
         self._estilo()
         self._cabecera()
@@ -298,6 +301,7 @@ class App(tk.Tk):
         self._pie()
         self.protocol("WM_DELETE_WINDOW", self.salir)
         self.bind("<KeyPress>", self._tecla)
+        self.bind("<KeyRelease>", self._suelta_tecla)
         self.after(33, self._pintar)
         self.after(120, self._desdovar)
         self.log("App %s. Datos en %s. %s" % (VERSION, DATOS, LASER))
@@ -401,11 +405,13 @@ class App(tk.Tk):
                          ("Estacionamiento", self.park), ("Parar motor", self.stop),
                          ("Origen (0,0)", lambda: self.ir_a(0.0, 0.0))):
             ttk.Button(b, text=txt, command=cmd).pack(side="left", padx=3)
-        ttk.Label(b, text="paso:").pack(side="left", padx=(18, 3))
+        ttk.Label(b, text="paso (toque):").pack(side="left", padx=(18, 3))
         self.cmb = ttk.Combobox(b, state="readonly", width=8,
                                 values=["%.2f mm" % v for v in hv.STEP_MM])
         self.cmb.current(1)
         self.cmb.pack(side="left")
+        ttk.Label(b, text="mantener = continuo", style="Chico.TLabel").pack(
+            side="left", padx=(10, 0))
         self.lbl_dir = ttk.Label(b, text="", style="Chico.TLabel")
         self.lbl_dir.pack(side="left", padx=18)
 
@@ -422,8 +428,8 @@ class App(tk.Tk):
         ttk.Label(m, text="Mover:", style="Chico.TLabel").pack(side="left", padx=(0, 8))
         for txt, d in (("W  +Y", "+Y"), ("D  +X", "+X"), ("S  -Y", "-Y"), ("A  -X", "-X")):
             b2 = ttk.Button(m, text=txt, width=6)
-            b2.bind("<ButtonPress-1>", lambda e, d=d: self.pulso(d))
-            b2.bind("<ButtonRelease-1>", lambda e: self._soltar())
+            b2.bind("<ButtonPress-1>", lambda e, d=d: self._toque(d))
+            b2.bind("<ButtonRelease-1>", lambda e: self._suelta())
             b2.pack(side="left", padx=2)
 
     def _marco(self, padre, titulo):
@@ -474,33 +480,93 @@ class App(tk.Tk):
         self.lbl_dir.configure(text="WASD segun la homografia:  " + "   ".join(
             "%s -> %s" % (k.upper(), m[k]) for k in ("w", "a", "s", "d")))
 
-    # -- jogging: un pulso deadbeat por pulsacion, repetido mientras se mantenga
-    def pulso(self, d, cada=None):
+    # -- jogging: toque corto = un pulso deadbeat (el paso de la lista, que es
+    # el que centra a 0.1 mm); mantener = UN keydown continuo hasta soltar. El
+    # continuo es lo que hace util la maquina: a pulsos de 3.4 mm hay que
+    # pulsar 120 veces para cruzar la cama, y a 5 mm/s de jog se tarda lo mismo
+    # que yendo a pie. La tecla se suelta siempre: la del continuo la suelta
+    # jog_hold, y la del toque tambien sale por el finally.
+    LARGO_MS = 220          # menos que esto es un toque, no un desplazamiento
+
+    def _toque(self, d):
+        """Boton o tecla pulsados."""
+        if self._jog_p:                 # se estaba soltando: reengancha
+            self.after_cancel(self._jog_p)
+            self._jog_p = None
+        if self._jog_ev is not None or self._jog_t is not None:
+            return                      # autorrepeticion: ya se esta moviendo
         if not self.video:
             self.log(SIN_CAM)
             return
-        self._tarea(self.maq.get().pan.hold, d, hv.STEP_MS[self.cmb.current()])
-        if cada:
-            self._rep = self.after(cada, self.pulso, d, cada)
+        self._jog_d = d
+        self._jog_t = self.after(self.LARGO_MS, self._sigue)
 
-    def _soltar(self):
-        if self._rep:
-            self.after_cancel(self._rep)
-            self._rep = None
+    def _sigue(self):
+        """Llevaba LARGO_MS pulsado: pasa a movimiento continuo."""
+        self._jog_t = None
+        self._jog_ev = threading.Event()
+        self._tarea(self._mueve, self._jog_d, self._jog_ev)
 
-    def _tecla(self, e):
-        """Solo con la ventana enfocada, y sin autorrepeticion del sistema: un
-        pulso por segundo no sirve para mover. Las flechas van por su tabla
-        (el teclado, no como este montada la camara) y las letras por la
-        homografia, igual que en la linea de ordenes."""
-        if self._escribiendo():
-            return                      # se esta escribiendo: no muevas nada
+    def _mueve(self, d, ev):
+        """En el hilo de trabajo: keydown continuo y keyup al soltar."""
+        pan = self.maq.get().pan
+        if pan is None:
+            self.log("sin panel: no se puede mover")
+            return None
+        return pan.jog_hold(d, ev)
+
+    def _paso(self, d):
+        """En el hilo de trabajo: un pulso deadbeat del paso elegido."""
+        pan = self.maq.get().pan
+        if pan is None:
+            self.log("sin panel: no se puede mover")
+            return None
+        return pan.hold(d, hv.STEP_MS[self.cmb.current()])
+
+    def _suelta(self, d=None):
+        """Se solto el boton o la tecla. El corte lleva 60 ms de retardo porque
+        en X11 la autorrepeticion manda keyup+keydown, y cortar de golpe
+        pararia y reanudaria el jog en cada repeticion."""
+        if d is not None and self._jog_d != d:
+            return                      # soltar Enter no para el jog de W
+        if not self._jog_p:
+            self._jog_p = self.after(60, self._fin)
+
+    def _fin(self):
+        """Ya no hay tecla pulsada: corta el continuo, o da el paso fino."""
+        self._jog_p = None
+        if self._jog_t is not None:
+            self.after_cancel(self._jog_t)
+            self._jog_t = None
+            self._tarea(self._paso, self._jog_d)
+        if self._jog_ev is not None:
+            self._jog_ev.set()
+            self._jog_ev = None
+
+    def _dir(self, e):
+        """La direccion que pide una tecla, o None."""
         d = FLECHAS.get(e.keysym)
         if not d:
-            m = hv._mapa_wasd(self.cfg, self.cal_res)
-            d = m.get(e.keysym.lower())
+            d = hv._mapa_wasd(self.cfg, self.cal_res).get(e.keysym.lower())
+        return d
+
+    def _tecla(self, e):
+        """Las flechas van por su tabla (el teclado, no como este montada la
+        camara) y las letras por la homografia, igual que en la linea de
+        ordenes. Mantener la tecla mueve de forma continua."""
+        if self._escribiendo():
+            return                      # se esta escribiendo: no muevas nada
+        d = self._dir(e)
         if d:
-            self.pulso(d)
+            self._toque(d)
+            return "break"
+
+    def _suelta_tecla(self, e):
+        if self._escribiendo():
+            return
+        d = self._dir(e)
+        if d:
+            self._suelta(d)
             return "break"
 
     def _escribiendo(self):
@@ -511,6 +577,7 @@ class App(tk.Tk):
         self._tarea(self.maq.get().park)
 
     def stop(self):
+        self._suelta()                   # corta tambien el jog continuo
         self._tarea(self.maq.get().pan.stop)
 
     def ir_a(self, x, y):
@@ -1016,7 +1083,14 @@ class App(tk.Tk):
         os.startfile(LOGF)
 
     def salir(self):
-        self._soltar()
+        # sin `after` que llegue a correr: cortar aqui mismo y en sincrono
+        for t in (self._jog_t, self._jog_p):
+            if t:
+                self.after_cancel(t)
+        self._jog_t = self._jog_p = None
+        if self._jog_ev is not None:
+            self._jog_ev.set()
+            self._jog_ev = None
         self.parar_cams()
         try:
             self.pool.submit(self.maq.cerrar).result(timeout=5)

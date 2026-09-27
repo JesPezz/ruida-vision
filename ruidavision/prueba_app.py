@@ -11,6 +11,7 @@ sacarse de la ventana: lo que se prueba es la aritmetica, no Tk.
     py -3 -m ruidavision.prueba_app
 """
 import sys
+import threading
 import time
 
 import numpy as np
@@ -104,6 +105,64 @@ def main():
     app.cal_ajusta()
     app.update()
     chk("avisa si faltan puntos", "4 puntos" in app.lbl_cal.cget("text"))
+
+    # Jog: un toque corto da UN paso fino (hold), mantener pasa a continuo
+    # (jog_hold) y al soltar se para. Se falsea el panel (para no abrir el
+    # socket) y se vuelve sincrono el hilo de trabajo: lo que se prueba es la
+    # maquina de estados del jog, no el pool.
+    class PanFalso:
+        def __init__(self):
+            self.holds, self.jogs, self.stops = [], [], 0
+
+        def hold(self, k, ms):
+            self.holds.append((k, ms))
+
+        def jog_hold(self, k, ev):
+            self.jogs.append((k, ev))
+
+        def stop(self):
+            self.stops += 1
+
+    class VideoFalso:
+        def __init__(self):
+            self.parar = threading.Event()
+
+        def join(self, timeout=None):
+            pass
+
+        def is_alive(self):
+            return True
+
+        def frame(self):
+            return (0, None, None)
+
+    pan = PanFalso()
+    app.maq.get = lambda: type("M", (), {"pan": pan})()
+    app.video = VideoFalso()
+    app._tarea = lambda fn, *a, **kw: fn(*a)
+    for attr in ("_jog_d", "_jog_t", "_jog_p", "_jog_ev"):
+        setattr(app, attr, None)
+
+    app._toque("+X")                     # toque corto: suelta antes de LARGO_MS
+    app._suelta("+X")
+    bombea(app, 0.3)
+    chk("un toque da un solo paso fino (+X)",
+        pan.holds == [("+X", A.hv.STEP_MS[app.cmb.current()])])
+    chk("un toque no arranca el continuo", not pan.jogs)
+
+    app._toque("+Y")                     # mantener: pasa a continuo
+    bombea(app, 0.4)
+    chk("mantener arranca el jog continuo (+Y)",
+        len(pan.jogs) == 1 and pan.jogs[0][0] == "+Y")
+    ev = pan.jogs[0][1] if pan.jogs else None
+    app._suelta("+X")                    # soltar otra tecla no corta el jog de +Y
+    chk("soltar otra direccion no corta el jog", ev is not None and not ev.is_set())
+    app._suelta("+Y")
+    bombea(app, 0.3)
+    chk("al soltar se corta el continuo", ev is not None and ev.is_set())
+
+    app.stop()                           # el boton PARAR tambien corta el jog
+    chk("PARAR detiene el panel", pan.stops == 1)
 
     app.salir()
     # El hilo del pool sigue vivo un instante (parkado) despues del shutdown:

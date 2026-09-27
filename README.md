@@ -269,6 +269,18 @@ opuesta a la documentación:
 
 Se manda `A5 50 <tecla>` para pulsar y `A5 51 <tecla>` para soltar.
 
+### En la GUI: un toque o mantener
+
+En la app (`ruidavision/`) un **toque corto** de la tecla o del botón da un solo paso
+fino (el del cuadro "paso"), y **mantener** pulsado mueve en continuo con el nuevo
+`Panel.jog_hold`: manda un solo *keydown*, va leyendo la posición y suelta al acercarse
+a los topes de viaje (10 mm), al soltar la tecla o al pulsar PARAR. El *keyup* va en un
+`finally`, así que la tecla nunca se queda pegada. Cada tarea de máquina corre en su
+propio hilo, de modo que mantener la tecla **no congela la ventana**.
+
+El techo de velocidad del continuo es el del perfil de LightBurn (5 mm/s), no algo que
+se ajuste desde la app: `set_param` por red no cambia nada (ver la sección de abajo).
+
 ### La resolución: qué la baja y qué no
 
 Un pulso de `t` ms recorre `~0.18 mm (desplazamiento fijo) + velocidad · t`. Con el

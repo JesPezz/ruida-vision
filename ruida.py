@@ -302,6 +302,51 @@ class Panel:
         time.sleep(ms / 1000.0)
         self.s.sendall(bytes([0xA5, 0x51, self.JOG[key]]))
 
+    def jog_hold(self, key, parar, margen=10.0, poll=0.08, max_ms=120000.0,
+                 verbose=True):
+        """Mantiene la tecla pulsada hasta que `parar` (threading.Event) se
+        active.
+
+        UN keydown para todo el recorrido, no una ristra de pulsos: la
+        controladora acelera al pulsar y frena al soltar, asi que encadenar
+        pulsos paga una rampa por cada uno y aun asi da tirones. El lazo solo
+        mira la posicion para no acercarse al tope de viaje; la tecla se suelta
+        SIEMPRE (finally), tambien si el proceso muere a mitad.
+
+        El tope de `max_ms` es un backstop por si el informe de posicion se
+        queda pegado: a 5 mm/s no llega a cortar en una cama entera.
+        """
+        k = self.JOG[key]
+        eje, sube = key[1], key[0] == "+"
+        tope = (self.SAFE[1] if sube else self.SAFE[0]) if eje == "X" \
+            else (self.SAFE[3] if sube else self.SAFE[2])
+        t0, malas, p = time.time(), 0, None
+        self.s.sendall(bytes([0xA5, 0x50, k]))
+        try:
+            while not parar.is_set():
+                if (time.time() - t0) * 1000.0 >= max_ms:
+                    if verbose:
+                        print("[jog] %s cortado por tiempo" % key)
+                    break
+                time.sleep(poll)
+                p = self.position(0.5)
+                if not self._ok(p):
+                    malas += 1
+                    if malas >= 2:
+                        if verbose:
+                            print("[jog] %s cortado: sin posicion creible" % key)
+                        break
+                    continue
+                malas = 0
+                cur = p[0] if eje == "X" else p[1]
+                if (tope - cur if sube else cur - tope) <= margen:
+                    if verbose:
+                        print("[jog] %s cortado a %.3f mm del tope" % (key, cur))
+                    break
+        finally:
+            self.s.sendall(bytes([0xA5, 0x51, k]))
+        return p
+
     def settled(self, tries=3, tol=0.005, pause=0.08):
         """Espera a que la posicion se pare: a alta velocidad el informe va
         retrasada ~9 ms y leer en caliente da saltos de varios mm. Rechaza
@@ -431,6 +476,8 @@ def selftest():
             if d == b"\xcc":          # el 0xce es keepalive, no pregunta
                 self._due = True
 
+        sendall = send
+
         def recv(self, n):
             if not self._due:
                 raise socket.timeout()
@@ -451,6 +498,33 @@ def selftest():
     pn._pending = None
     assert pn.position(timeout=0.1) == want, "position() no pregunta con 0xCC"
     assert b"\xcc" in pn.s.sent, "no se pregunto al menos una vez"
+    # jog continuo: una sola pulsacion de tecla, se suelta SIEMPRE, y corta
+    # antes de llegar al tope de viaje. Sin esto, un evento que no llega deja
+    # la tecla pegada y el cabezal contra el tope.
+    class Nadie:
+        def is_set(self):
+            return False
+
+    class Cuenta:
+        """Deja pasar n vueltas de lazo y luego corta."""
+
+        def __init__(self, n):
+            self.n = n
+
+        def is_set(self):
+            self.n -= 1
+            return self.n < 0
+
+    pn.position = lambda t=0: (250.0, 200.0)
+    pn.s.sent[:] = []
+    pn.jog_hold("+X", Cuenta(2), poll=0.01, verbose=False)
+    assert pn.s.sent[0].hex() == "a55001", pn.s.sent[0].hex()
+    assert pn.s.sent[-1].hex() == "a55101", "el jog continuo no solto la tecla"
+    assert pn.s.sent.count(bytes.fromhex("a55001")) == 1, "mas de un keydown"
+    pn.position = lambda t=0: (250.0, 396.0)          # a 4 mm del tope de Y
+    pn.s.sent[:] = []
+    pn.jog_hold("+Y", Nadie(), poll=0.01, verbose=False)
+    assert pn.s.sent[-1].hex() == "a55104", "ni corto ni solto en el tope"
     # el detector de magic tiene que encontrar un magic que no es el de defecto
     moves = b"".join(b"\x89" + enc_rel(dx, dy) for dx, dy in
                      ((4.0, 2.0), (-1.5, 3.0), (2.0, -2.0), (0.5, 0.5),

@@ -1,8 +1,10 @@
 # Notas para la próxima sesión
 
 Estado: los **cuatro problemas reportados están arreglados y con tests que los cubren**
-(`py -u hybrid_vision.py test`, 13 líneas OK). Lo que queda es lo que solo se puede
-comprobar con la máquina delante.
+(`py -u hybrid_vision.py test`, 13 líneas OK). Además ya está la **app de escritorio**
+(`ruidavision/`: GUI, instalador de Windows y OTA) y el jog dejó de ir a tirones —
+mantener la tecla o el botón mueve en continuo, un toque corto da un paso fino. Lo que
+queda es lo que solo se puede comprobar con la máquina delante.
 
 ## 1. Se movía a la inversa — ARREGLADO
 
@@ -38,10 +40,11 @@ vuelta se dibuja con la última conocida. Además ahora se distingue en pantalla
 posición leída, "posicion: leyendo..." y **"SIN RESPUESTA DEL PANEL (50207)"** cuando el
 handshake falló (`Machine.ok`).
 
-**(c) `Panel.hold` con `time.sleep` (ruida.py:299) — PENDIENTE, sin tocar.** Un paso de
-3.4 mm son 100 ms de congelación por tecla en el hilo de la interfaz. En la CLI se nota
-poco; cuando llegue la app GUI hay que hacerlo con un hilo (`threading`) que mande el
-jog y devuelva el control al lazo de dibujo. **No se ha tocado `ruida.py`.**
+**(c) `Panel.hold` con `time.sleep` (ruida.py:299) — ARREGLADO en la GUI.** `hold` sigue
+igual (la CLI no lo sufre), pero la app ya no manda pulsos sueltos: en `ruidavision/app.py`
+cada tarea de máquina corre en un `ThreadPoolExecutor(max_workers=1)` y el jog usa el nuevo
+`Panel.jog_hold` (un solo *keydown*, bucle leyendo posición, *keyup* en el `finally`).
+Mantener la tecla o el botón mueve en continuo; un toque corto da un paso fino.
 
 ## 3. La ventana no se redimensionaba — ARREGLADO
 
@@ -69,24 +72,35 @@ cabe en pantalla.
 - El punto malo (px(541,46)=mm(0,0)) sigue en `cfg["points"]`; es cosmético, `run` solo
   usa `H` y `calibrate` sobrescribe `points`.
 
-## 6. Lo siguiente: la app GUI
+## 6. La app GUI, el instalador y el OTA — HECHO
 
-Pendiente de lo que pidió el usuario después: GUI, instalador de Windows y actualización
-OTA por release de GitHub. **Nada de eso está escrito todavía** — que quede clarísimo
-porque ya pasó dos veces que se di por hecho. Al hacerlo, ojo al punto 2c (el jog tiene
-que ir en un hilo) y a que el clic de calibración se guarde con su posición real, no en
-`(960,540)`.
+`ruidavision/` tiene la app Tkinter (pestañas Vivo / Calibrar / Marcas / Ajustes),
+`RuidaVision.spec` + `build_windows.bat` (PyInstaller) + `installer/RuidaVision.iss`
+(Inno Setup 6), y `ruidavision/actualizar.py` (OTA contra `releases/latest` de GitHub).
+
+Queda por hacer / comprobar:
+- Publicar la **release v1.1** en GitHub: el tag `v1.0` apunta un commit por detrás de
+  `main` y no hay release publicada, así que el OTA todavía no encuentra nada. Bumpear
+  `VERSION` en `ruidavision/__init__.py` antes de empaquetar.
+- El techo de **5 mm/s es del perfil de LightBurn** ("Config maquina jog lento"); no se
+  puede cambiar desde aquí porque `set_param` no hace nada (README 319-323).
 
 ## Cómo probar
 
 ```
 py hybrid_vision.py test                                  # 13 líneas, sin máquina
+python ruida.py test                                      # protocolo del panel, sin máquina
 py hybrid_vision.py calibrate --park 20,20                # ventana con las 2 cámaras
+
+# App de escritorio (en la Pi hace falta xvfb-run: no tiene escritorio real)
+/root/venv/bin/python -m ruidavision.prueba_app           # 20 comprobaciones de GUI y jog
 ```
 
 W A S D mueven, un paso por pulsación; `v` cicla el paso entre 0.2 / 0.44 / 3.4 mm; Enter
 acepta el punto; `q` sale. Si sale `tecla 0x... sin asignar`, ese es el código crudo de
 una tecla que falta en la tabla.
 
-Espejo de trabajo: `/root/ruida-vision` (mismo `hybrid_vision.py` y `README.md`,
-sincronizar con `scp -O` + `cmp` y borrar `__pycache__`).
+Espejo de trabajo: la **Raspberry Pi** `root@192.168.1.107:/root/ruida-vision` (mismo
+commit que el PC). Para probar la GUI hay que usar `/root/venv/bin/python` (el `python3`
+del sistema no tiene `cv2`) y `xvfb-run -a` (la Pi no tiene escritorio). El espejo viejo
+del PC (`/root/ruida-vision`) se borró: era el commit base, sin los arreglos.
