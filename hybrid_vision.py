@@ -1,0 +1,1158 @@
+"""Vision hibrida para laser CO2 con controladora Ruida.
+
+Cenital (coarse) -> marca de registro en mm via homografia.
+Cabezal (fine)   -> microscopio: recentra la marca con submicro precision.
+
+Flujo: calibrate -> run. Configuracion y homografia en calib.json.
+"""
+
+import argparse
+import itertools
+import json
+import math
+import os
+import sys
+import time
+
+import cv2
+import numpy as np
+
+try:
+    import msvcrt
+except ImportError:      # fuera de Windows no hay consola que leer
+    msvcrt = None
+
+import ruida
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+CFG = os.path.join(HERE, "calib.json")
+BED_PNG = os.path.join(HERE, "bed.png")
+MARKS_PNG = os.path.join(HERE, "marks.png")
+# el orden importa: DSHOW es el que funciona con camaras USB en Windows
+BACKENDS = [getattr(cv2, "CAP_DSHOW", -1), cv2.CAP_ANY]
+DEFAULTS = {
+    "ip": "192.168.1.50",
+    "top_cam": 2,
+    "head_cam": 0,
+    "res": [1920, 1080],
+    "top_res": [1920, 1080],
+    "head_res": [1280, 720],
+    "fps": 30,
+    "park": [20.0, 20.0],
+    "head_fov_mm": 30.0,
+    "head_flip_x": 1,
+    "head_flip_y": 1,
+    "cam_offset_mm": [0.0, 0.0],
+    "marks": 2,
+    "settle": 1.5,
+    "min_area": 8,
+    "max_area": 40000,
+    "thr": 0,
+    "exposure": None,
+    "gain": None,
+}
+
+
+def load_cfg():
+    cfg = dict(DEFAULTS)
+    if os.path.exists(CFG):
+        cfg.update(json.load(open(CFG)))
+    return cfg
+
+
+def save_cfg(cfg):
+    json.dump(cfg, open(CFG, "w"), indent=2)
+    print("guardado %s" % CFG)
+
+
+# --------------------------------------------------------------------- camaras
+
+def open_cam(cfg, which):
+    idx = cfg["%s_cam" % which]
+    cap = None
+    for be in BACKENDS:
+        cap = cv2.VideoCapture(idx, be)
+        if cap.isOpened():
+            break
+        cap.release()
+    if not cap.isOpened():
+        raise IOError("no se abre la camara %s (indice %d). Prueba otro indice "
+                      "o revisa que el driver la vea" % (which, idx))
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+    # cada camara tiene su nativa: la cenital es mas grande que la del cabezal,
+    # asi que pedirle la de la otra hace que el driver avise cada vez
+    res = cfg.get("%s_res" % which) or cfg["res"]
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, res[0])
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res[1])
+    cap.set(cv2.CAP_PROP_FPS, cfg["fps"])
+    if cfg["exposure"] is not None:
+        cap.set(cv2.CAP_PROP_EXPOSURE, cfg["exposure"])
+    if cfg["gain"] is not None:
+        cap.set(cv2.CAP_PROP_GAIN, cfg["gain"])
+    for _ in range(12):
+        cap.read()
+    # el driver puede no dar lo pedido: la real es la unica que vale
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if (w, h) != tuple(res):
+        print("AVISO: %s pedia %dx%d y entrega %dx%d; se usa la real"
+              % (which, res[0], res[1], w, h))
+    print("camara %s: indice %d, %dx%d" % (which, idx, w, h))
+    return cap
+
+
+def grab(cap, n=3):
+    """Gris y nitido: de n fotogramas devuelve el mas enfocado."""
+    best, score = None, -1.0
+    for _ in range(n):
+        ok, f = cap.read()
+        if not ok:
+            raise IOError("fallo de captura de video")
+        g = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+        s = cv2.Laplacian(g, cv2.CV_64F).var()
+        if s > score:
+            best, score = g, s
+    return best
+
+
+# ---------------------------------------------------------------- deteccion
+
+def find_marks(gray, roi=None, min_area=8, max_area=40000, thr=0, merge=1,
+               show=False):
+    """Marcas de registro: componentes oscuros de area plausible, centro
+    subpixel por momentos. Sirve para puntos y para cruces.
+
+    `merge` agrupa en una sola marca las detecciones cuyos centroides caen en el
+    mismo pixel. El tag de LightBurn es un aro con la cruz dentro, y sin esto son
+    dos blobs: dos detecciones y dos marcas fantasma. Como el centroide de un aro
+    y el de una cruz concentricos caen ambos en el centro del tag, agrupar por
+    centroide las junta sin depender de la separacion entre aro y cruz, que
+    cambia con el tamano. Los tags sueltos de la cama van tan lejos que no se
+    tocan."""
+    x0, y0 = (roi[0], roi[1]) if roi else (0, 0)
+    g = gray[y0:roi[3], x0:roi[2]] if roi else gray
+    if thr:
+        binimg = (g < thr).astype(np.uint8)
+    else:
+        binimg = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1] // 255
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(binimg, 8)
+    out = []
+    for i in range(1, n):
+        a = stats[i, cv2.CC_STAT_AREA]
+        if a < min_area or a > max_area:
+            continue
+        x, y, w, h = stats[i, :4]
+        m = cv2.moments((lab[y:y + h, x:x + w] == i).astype(np.uint8))
+        if m["m00"] <= 0:
+            continue
+        out.append((x0 + x + m["m10"] / m["m00"],
+                    y0 + y + m["m01"] / m["m00"], int(a)))
+    out.sort(key=lambda p: p[2], reverse=True)
+    if merge:
+        # De mayor a menor area: cada deteccion se une a la primera del grupo
+        # que ya tenga el centro a menos de `merge` pixeles, y el centro del
+        # grupo es la media ponderada por area.
+        grupos = []
+        for u, v, a in out:
+            for j, (U, V, A) in enumerate(grupos):
+                if abs(U - u) <= merge and abs(V - v) <= merge:
+                    t = A + a
+                    grupos[j] = ((U * A + u * a) / t, (V * A + v * a) / t, t)
+                    break
+            else:
+                grupos.append((u, v, a))
+        out = sorted(grupos, key=lambda p: p[2], reverse=True)
+    if show:
+        vis = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        for u, v, a in out:
+            cv2.drawMarker(vis, (int(u), int(v)), (0, 0, 255),
+                           cv2.MARKER_CROSS, 20, 1)
+        cv2.imwrite(MARKS_PNG, vis)
+        print("marcas: %s" % MARKS_PNG)
+    return out
+
+
+def click_point(gray, prompt, n=1):
+    pts = []
+    win = "click"
+    cv2.namedWindow(win)
+    cv2.imshow(win, gray)
+    cv2.setMouseCallback(win, lambda e, x, y, f, _=None:
+                         pts.append((x, y)) if e == cv2.EVENT_LBUTTONDOWN else None)
+    print(prompt + "  (clic para marcar, q para cancelar)")
+    while len(pts) < n:
+        if (cv2.waitKey(30) & 0xFF) in (ord("q"), 27):
+            cv2.destroyWindow(win)
+            raise KeyboardInterrupt("cancelado por el usuario")
+    cv2.destroyWindow(win)
+    return pts[0] if n == 1 else pts[:n]
+
+
+# --------------------------------------------------------------- homografia
+
+def fit_homography(px, mm):
+    """Devuelve (H, error_max, error_medio, descartados).
+
+    Los errores se miden SOLO sobre los puntos que RANSAC acepta. Medirlos
+    tambien sobre los descartados es lo que hacia que una calibracion buena
+    (5 puntos a 0.8 mm) pareciese un desastre (477 mm) y obligaba a repetir
+    trabajo ya hecho. Los descartados se devuelven aparte, con su numero, para
+    poder decir cuales son sin tener que adivinarlos.
+    """
+    src = np.array(px, np.float32)
+    dst = np.array(mm, np.float32)
+    H, mask = cv2.findHomography(src, dst, cv2.RANSAC, 3.0)
+    if H is None:                      # no hay modelo: sin inliers, se avisa
+        return None, float("inf"), float("inf"), list(range(len(px)))
+    mask = mask.ravel().astype(bool)
+    kept = [i for i in range(len(px)) if mask[i]]
+    if len(kept) < 4:                 # demasiado pocos puntos buenos
+        return None, float("inf"), float("inf"), list(range(len(px)))
+    err = {i: math.dist(tuple(p), dst[i]) for i, p in
+           zip(kept, cv2.perspectiveTransform(src[kept][:, None, :], H)[:, 0, :])}
+    return (H, max(err.values()), sum(err.values()) / len(err),
+            [i for i in range(len(px)) if not mask[i]])
+
+
+def px_to_mm(H, px):
+    p = cv2.perspectiveTransform(np.array([px], np.float32)[:, None, :], H)
+    return float(p[0, 0, 0]), float(p[0, 0, 1])
+
+
+# ------------------------------------------------------------------ maquina
+
+class Machine:
+    def __init__(self, cfg, need_pos=True):
+        self.cfg = cfg
+        self.pan = ruida.Panel(cfg["ip"]) if need_pos else None
+        if self.pan and not self.pan.handshake():
+            print("AVISO: la Ruida no contesta en 50207; se usara espera fija")
+
+    def park(self):
+        return ruida.move_and_wait(self.pan, *self.cfg["park"])
+
+    def goto(self, x, y):
+        return ruida.move_and_wait(self.pan, x, y)
+
+    def pos(self, timeout=1.0):
+        if not self.pan:
+            return None
+        return self.pan.position(timeout)
+
+    def close(self):
+        for c in (self.pan,):
+            if c:
+                c.close()
+
+
+def ask_position():
+    x, y = input("X Y en mm (los que pone LightBurn): ").split()
+    return float(x), float(y)
+
+
+# ------------------------------------------------------------------ fases
+
+# FLECHAS DIRECCIONALES DEL TECLADO. El codigo VK va en la palabra alta
+# (VK_LEFT=0x25 -> 0x250000 = 2424832, el valor de todos los ejemplos de
+# OpenCV), pero como lo empaqueta depende de la version de OpenCV y del
+# teclado, y aqui se aceptan todas las formas conocidas:
+#   0x250000        VK en la palabra alta, lo normal
+#   0x25004B        VK arriba con el scan code pegado debajo
+#   0xFFFFFFE0      y al siguiente waitKey el scan code (ARROW_EXT)
+#   0x25 a secas    el VK suelto
+#   0x21 a 0x24     el teclado numerico con NumLock apagado, que produce
+#                   flechas pero como Home/End/Pagina arriba/Pagina abajo
+# Abajo es -Y porque el origen de la maquina esta abajo a la izquierda.
+VK = {0x25: "-X", 0x26: "+Y", 0x27: "+X", 0x28: "-Y"}
+SCAN = {0x48: "+Y", 0x4B: "-X", 0x4D: "+X", 0x50: "-Y"}
+NUMPAD = {0x21: "+Y", 0x22: "-X", 0x23: "+X", 0x24: "-Y"}
+ARROW_EXT = -32          # 0xFFFFFFE0 con signo, precede al scan code
+# Los scan codes de msvcrt son OTROS que los de OpenCV: aqui la izquierda es P
+# y abajo S, mientras que en OpenCV la izquierda es K y abajo P. No mezclarlos.
+MS_SCAN = {0x48: "+Y", 0x50: "-X", 0x4D: "+X", 0x53: "-Y"}
+MS_NUMPAD = {0x48: "+Y", 0x4B: "-X", 0x4D: "+X", 0x47: "-Y"}   # con NumLock off
+
+# LETRAS. Las flechas aqui llegan partidas: en la consola se lee el prefijo
+# '\xe0' y el segundo byte no aparece nunca, y en la ventana de OpenCV el
+# codigo depende de como se empaquete. Una letra llega siempre y en un solo
+# golpe, que es lo que hace falta. WASD, que es lo que se prueba primero.
+# La velocidad va en 'v' porque 's' aqui es abajo y no se puede pisar.
+# Mayusculas tambien, por si el Bloq Mayus esta puesto.
+LETRAS = {"w": "+Y", "a": "-X", "s": "-Y", "d": "+X"}
+VEL_KEY = "v"
+
+
+def _flecha(k, ext):
+    """Flecha de OpenCV como '-X'/'+X'/'-Y'/'+Y', o None si no es flecha.
+
+    `ext` dice si el codigo vino precedido de ARROW_EXT, y es la unica pista
+    para mirar SCAN: sin ella, 0x48 y 0x4B son tambien H y K en mayusculas y
+    pulsarlas moveria el cabezal en vez de escribir. VK y NUMPAD si se pueden
+    mirar sueltos porque sus codigos (%&'(" y !"#$) no chocan con ninguna letra.
+    """
+    if ext:
+        return SCAN.get(k)
+    if k > 0xFF:
+        return VK.get((k >> 16) & 0xFF)
+    return VK.get(k) or NUMPAD.get(k)
+
+
+# Prefijo de tecla extendida ('\x00' o '\xe0') que ya se leyo de la consola
+# y esta esperando su scan code. Vive fuera de _tecla porque se lee y se
+# consume en llamadas distintas.
+_PEND = []
+
+
+def _tecla():
+    """(codigo, direccion) de la siguiente tecla, o (-1, None) si no hay.
+
+    ESTA ES LA PIEZA QUE FALTABA. cv2.waitKey solo ve las teclas si la ventana
+    de OpenCV tiene el foco del teclado, y msvcrt solo las ve si el foco lo
+    tiene la consola. Leyendo solo una de las dos, hay que acertar cual de las
+    dos tiene el foco; en cuanto se clica en la otra, el programa se queda
+    mudo sin decir nada, que es lo que pasaba con las flechas y con la q. Se
+    leen las dos y gana la primera que conteste, asi que da igual cual tenga el
+    foco. El msvcrc devuelve '\x00' o '\xe0' antes del scan code de las
+    teclas especiales, y los scan codes suyos son otros que los de OpenCV.
+    """
+    if msvcrt is not None and msvcrt.kbhit():
+        c = msvcrt.getwch()
+        if c in ("\x00", "\xe0"):
+            # Una tecla extendida llega en DOS golpes: el prefijo '\xe0' y mas
+            # tarde el scan code, y el hueco entre los dos es unpredictable.
+            # getwch() no se puede usar para esperar, asi que en vez de
+            # esperar se APUNTA que hay un prefijo pendiente y el scan code se
+            # lee en la vuelta siguiente, cuando ya haya llegado. Antes se
+            # perdia la flecha entera en silencio y solo salia un 0x0.
+            _PEND.append(c)
+            return (-1, None)
+        # Si hay un prefijo pendiente, este caracter es su scan code... pero
+        # solo si de verdad esta en la tabla. En esta maquina el segundo byte
+        # no llega nunca, y sin esta comprobacion el prefijo se comeria la
+        # SIGUIENTE tecla (pulsas flecha, luego 'w', y la w desaparece). Si no
+        # es un scan code conocido se trata como tecla normal y no se pierde.
+        n = ord(c) if c else -1
+        if _PEND:
+            _PEND.clear()
+            d = MS_SCAN.get(n) or MS_NUMPAD.get(n)
+            if d is not None:
+                return (0, d)
+        return (n, LETRAS.get(chr(n).lower()) if n > 0 else None)
+    k = cv2.waitKey(30)
+    if k == ARROW_EXT:                   # forma extendida de OpenCV
+        k2 = cv2.waitKey(10)
+        return (k2 if k2 >= 0 else 0, SCAN.get(k2))
+    return (k, _flecha(k, False) or
+            (LETRAS.get(chr(k).lower()) if 0 < k < 0x80 else None))
+# Pulsos deadbeat de 1, 20 y 100 ms -> 0.2, 0.44 y 3.4 mm con el perfil lento.
+STEP_MS = (1, 20, 100)
+STEP_MM = (0.2, 0.44, 3.4)
+
+
+def _escala(im, alto):
+    h, w = im.shape[:2]
+    return cv2.resize(im, (max(1, int(w * alto / h)), alto),
+                      interpolation=cv2.INTER_AREA)
+
+
+def mirar(m, top, head, i, n, frames=1, verbose=True):
+    """Las dos camaras a la vez y el cabezal a las flechas, hasta Enter.
+
+    Izquierda: la del cabezal, que es donde la marca tiene que quedar centrada
+    y por eso va con la cruz y la ventana de busqueda dibujadas. Derecha: la
+    cenital, para ver el contexto y elegir el siguiente punto, con un circulo
+    rojo en donde esta el cabezal ahora (si ya hay homografia guardada).
+
+    Las flechas van en pasos deadbeat y 's' cambia de velocidad, asi que se
+    llega al punto a base de pasos de 0.2 mm sin depender de LightBurn. Enter
+    acepta, q sale.
+    """
+    win = "calibra punto %d/%d" % (i, n)
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+    Hinv, cal = None, (1920, 1080)
+    if m.cfg.get("H"):
+        try:
+            Hinv = np.linalg.inv(np.array(m.cfg["H"], float))
+            cal = tuple(m.cfg.get("top_res") or m.cfg["res"])
+        except np.linalg.LinAlgError:
+            Hinv = None
+    pos, vel, ultima = None, 1, 0.0
+    del _PEND[:]
+    if verbose:
+        print("\npunto %d/%d: mueve con W A S D (o con las flechas), 'v' "
+              "cambia de velocidad, Enter acepta, q sale" % (i, n), flush=True)
+    while True:
+        # grab() devuelve el frame mas enfocado en GRIS (el Laplacian va a un
+        # canal), y ahi hay que llevar la imagen a color: si no, el hstack con
+        # el separador de 3 canales peta y los dibujo de color se pierden.
+        img = _escala(cv2.cvtColor(grab(head, frames), cv2.COLOR_GRAY2BGR), 720)
+        # Preguntar la posicion cuesta hasta un timeout entero si la Ruida no
+        # contesta, y eso se come el bucle: a 1 Hz no se puede ir haciendo
+        # jog. Se pregunta dos veces por segundo y el resto se dibuja con la
+        # ultima que se sepa.
+        ahora = time.time()
+        if ahora - ultima > 0.5:
+            ultima = ahora
+            p = m.pos(0.6)
+            if p:
+                pos = p
+        if pos:
+            cv2.putText(img, "%.1f, %.1f mm" % pos, (12, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            cv2.putText(img, "paso %.1f mm" % STEP_MM[vel], (12, 58),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        cv2.putText(img, "W A S D  mover   v  velocidad   Enter  ok   q  salir",
+                    (12, img.shape[0] - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (255, 255, 255), 1)
+        h0, w0 = img.shape[:2]
+        cx, cy = w0 // 2, h0 // 2
+        # ventana util de la busqueda, para ver si la marca cabe dentro
+        pad = int(min(w0, h0) * 0.35)
+        cv2.rectangle(img, (cx - pad, cy - pad), (cx + pad, cy + pad),
+                      (0, 200, 0), 1)
+        cv2.line(img, (cx - 25, cy), (cx + 25, cy), (0, 255, 255), 1)
+        cv2.line(img, (cx, cy - 25), (cx, cy + 25), (0, 255, 255), 1)
+
+        gt = _escala(cv2.cvtColor(grab(top, frames), cv2.COLOR_GRAY2BGR), 720)
+        if Hinv is not None and pos:
+            # Hinv devuelve pixeles de la resolucion con la que se calibro, que
+            # no tiene por que ser la del frame actual: se escala antes de
+            # dibujar el circulo.
+            # perspectiveTransform ya divide por la tercera coordenada y
+            # devuelve 2D: no hay que normalizar a mano como con H @ [x,y,1].
+            q = cv2.perspectiveTransform(
+                np.array([[[pos[0], pos[1]]]], np.float64), Hinv)[0, 0]
+            tx = q[0] * gt.shape[1] / cal[0]
+            ty = q[1] * gt.shape[0] / cal[1]
+            if 0 <= tx < gt.shape[1] and 0 <= ty < gt.shape[0]:
+                cv2.circle(gt, (int(tx), int(ty)), 14, (0, 0, 255), 2)
+                cv2.line(gt, (int(tx) - 20, int(ty)), (int(tx) + 20, int(ty)),
+                         (0, 0, 255), 1)
+        gap = np.full((720, 6, 3), 40, np.uint8)
+        cv2.imshow(win, np.hstack([img, gap, gt]))
+
+        k, d = _tecla()
+        if k in (ord("q"), 27):
+            cv2.destroyWindow(win)
+            return "q"
+        if k == 13:
+            cv2.destroyWindow(win)
+            return "accept"
+        if k == ord(VEL_KEY) or k == ord(VEL_KEY.upper()):
+            vel = (vel + 1) % len(STEP_MS)
+            print("  velocidad de paso: %.1f mm" % STEP_MM[vel],
+                  flush=True)
+        elif d:
+            if m.pan:
+                m.pan.hold(d, STEP_MS[vel])
+            else:
+                print("  sin panel: no se puede mover", flush=True)
+        elif k == 0:
+            # Prefijo de tecla extendida leido pero sin scan code detras: el
+            # segundo byte no llego. Dice otra cosa que "codigo desconocido".
+            print("  flecha sin scan code: llego el prefijo y no el segundo "
+                  "byte", flush=True)
+        elif k >= 0:
+            # Eco de CUALQUIER tecla que no sea una orden, para que se vea que
+            # lo que falla es el codigo y no el foco. Con las flechas de verdad
+            # no tiene que salir nunca; si sale, el numero es el codigo crudo y
+            # con el se anade la entrada que falte en las tablas de arriba.
+            print("  tecla 0x%X (%r) sin asignar" % (k, chr(k)), flush=True)
+
+
+def cmd_calibrate(a):
+    cfg = load_cfg()
+    if a.park:
+        cfg["park"] = [float(v) for v in a.park.split(",")]
+    if a.top is not None:
+        cfg["top_cam"] = a.top
+    cfg["res"] = [a.width, a.height]
+    m = Machine(cfg)
+    top = open_cam(cfg, "top")
+    # La camara del cabezal no la usa la homografia, asi que queda libre para
+    # usarla de puntero: ayuda a poner el cabezal encima de la referencia, que
+    # es lo que decide la precision del punto (el par que se guarda es la
+    # posicion del cabezal contra el pixel del clic).
+    head = None if a.no_watch else open_cam(cfg, "head")
+    px, mm = [], []
+    try:
+        for i in range(a.points):
+            while True:
+                if head is not None:
+                    # Las dos camaras a la vez y W A S D mueven el cabezal:
+                    # no hace falta LightBurn. Con --no-watch se cae al modo
+                    # consola de antes (mover con el mando y escribir el X Y).
+                    r = mirar(m, top, head, i + 1, a.points, a.frames)
+                    if r == "q":
+                        raise KeyboardInterrupt
+                elif input().strip().lower() == "q":
+                    raise KeyboardInterrupt
+                if a.manual:
+                    p = ask_position()
+                else:
+                    p = m.pos(2.0)
+                    if p is None:
+                        print("sin informe de posicion: reintenta o usa --manual")
+                        continue
+                break
+            m.park()
+            g = grab(top, a.frames)
+            uv = click_point(g, "clic en la marca de referencia %d" % (i + 1))
+            px.append(uv)
+            mm.append(p)
+            print("  pixel (%.1f, %.1f) = maquina (%.3f, %.3f)" % (uv + p))
+        H, e_max, e_avg, malos = fit_homography(px, mm)
+        if H is None:
+            sys.exit("no queda ningun modelo: mide de nuevo, con puntos mas "
+                     "separados y clica en el centro de la mancha")
+        # Los puntos que RANSAC rechazo no se guardan: si se guardaran, la
+        # proxima calibracion los volveria a meter y a contaminar el ajuste.
+        cfg["H"] = H.tolist()
+        cfg["points"] = [(px[i], mm[i]) for i in range(len(px)) if i not in malos]
+        print("\nerror de reproyeccion sobre %d puntos: max %.3f mm, medio %.3f mm"
+              % (len(cfg["points"]), e_max, e_avg))
+        for i in malos:
+            print("  DESCARTADO el punto %d (pixel %.1f, %.1f = maquina "
+                  "%.3f, %.3f): no cuadra, normalmente por un clic en la "
+                  "marca de al lado. Repetir ese punto si se repite."
+                  % (i + 1, px[i][0], px[i][1], mm[i][0], mm[i][1]))
+        if e_max > 1.0:
+            print("AVISO: error alto entre los puntos aceptados. Mide con mas "
+                  "precision o repite puntos.")
+        save_cfg(cfg)
+        print("fija el origen del laser en la esquina inferior izquierda "
+              "y no lo cambies")
+    finally:
+        top.release()
+        if head is not None:
+            head.release()
+        m.close()
+
+
+def cmd_fov(a):
+    """Mide el campo de vision de la camara del cabezal y lo guarda.
+
+    Es lo unico que falta para el ajuste fino y no se puede deducir: hace
+    falta una distancia real en la mesa (una regla, o dos marcas separadas
+    un milimetro que sepas)."""
+    cfg = load_cfg()
+    cap = open_cam(cfg, "head")
+    try:
+        g = grab(cap, a.frames)
+        h, w = g.shape
+        p1, p2 = click_point(g, "clic en los dos extremos de una distancia "
+                                 "que sepas de verdad", n=2)
+        mm = float(input("esa distancia en la mesa, en mm: "))
+        if mm <= 0 or p1 == p2:
+            sys.exit("distancia no valida")
+        k = mm / math.dist(p1, p2)          # mm por pixel
+        cfg["head_fov_mm"] = k * w
+        save_cfg(cfg)
+        print("\nhead_fov_mm = %.2f   (%.4f mm/px sobre %d px de ancho)"
+              % (cfg["head_fov_mm"], k, w))
+        print("campo de vision vertical: %.2f mm" % (k * h))
+    finally:
+        cap.release()
+
+
+def pick_pair(marks):
+    """La pareja de marcas mas separada: la mas estable frente al ruido."""
+    return max(itertools.combinations(marks, 2),
+               key=lambda p: math.dist(p[0][0], p[1][0]))
+
+
+def cmd_run(a):
+    cfg = load_cfg()
+    if "H" not in cfg:
+        sys.exit("falta calib.json: ejecuta antes 'calibrate'")
+    H = np.array(cfg["H"], np.float32)
+    marks_wanted = a.marks or cfg["marks"]
+    # ROI opcional en mm de maquina: "x0,y0,x1,y1". En una cama llena de tags
+    # de calibracion sirve para quedarse solo con las dos marcas del material.
+    roi_mm = ([float(v) for v in a.roi.split(",")]
+              if a.roi else cfg.get("roi_mm"))
+    if roi_mm and len(roi_mm) != 4:
+        sys.exit("--roi toma 4 numeros: x0,y0,x1,y1 en mm de maquina")
+    m = Machine(cfg)
+    top = open_cam(cfg, "top")
+    head = open_cam(cfg, "head")
+    out = []
+    try:
+        if a.no_move:
+            p = cfg["park"]
+            print("sin movimiento: solo deteccion desde el estacionamiento %s" % p)
+        else:
+            m.park()
+        g = grab(top, a.frames)
+        cv2.imwrite(BED_PNG, g)
+        found = find_marks(g, min_area=cfg["min_area"], max_area=cfg["max_area"],
+                           thr=cfg["thr"], show=a.debug)
+        print("marcas detectadas: %d" % len(found))
+        if len(found) < marks_wanted:
+            sys.exit("faltan marcas (%d de %d). Mira %s y "
+                     "ajusta thr o min_area en calib.json"
+                     % (len(found), marks_wanted, BED_PNG))
+        if len(found) > marks_wanted and not roi_mm:
+            # p.ej. un aro con la cruz suelta dentro son DOS componentes, no
+            # una marca. Sin esto el codigo elige las dos mas separadas y puede
+            # emparejar un aro con la cruz de otra marca sin decir nada.
+            # Con --roi el exceso es esperado: hay tags de calibracion por medio.
+            print("AVISO: %d marcas detectadas pero esperabamos %d. Cada marca "
+                  "debe ser UNA sola mancha oscura continua: un aro con la cruz "
+                  "suelta dentro cuenta por dos. Mira %s con --debug y haz la "
+                  "marca solida (disco relleno, o disco con la cruz en blanco "
+                  "dentro)." % (len(found), marks_wanted, BED_PNG))
+        # (mm, px) van juntos: al reordenar marcas hay que mover los dos
+        marks = [(px_to_mm(H, (u, v)), (u, v)) for u, v, _ in found]
+        # La caja de la maquina es la ROI por defecto. Una homografia ajustada
+        # con puntos en una zona extrapola mal fuera de ella: un tag de
+        # calibracion cerca del borde de la imagen sale en mm que no existen
+        # (599, 412 en una cama de 500x400). Mover ahi es un ValueError, y si
+        # el tope fuera mayor seria el cabezal contra un tope de recorrido.
+        # --roi solo la estrecha, para quedarse con las dos marcas del
+        # material en una cama llena de tags de calibracion.
+        if roi_mm:
+            x0, y0, x1, y1 = roi_mm
+        else:
+            # SAFE va como (x0, x1, y0, y1), no como el ROI. Ojo al desempaquetar.
+            x0, x1, y0, y1 = ruida.Panel.SAFE
+            roi_mm = (x0, y0, x1, y1)
+        dentro, fuera = [], []
+        for mk in marks:
+            (dentro if x0 <= mk[0][0] <= x1 and y0 <= mk[0][1] <= y1
+             else fuera).append(mk)
+        if fuera:
+            print("fuera de %s: %d marcas %s"
+                  % (roi_mm, len(fuera),
+                     [(round(mk[0][0], 1), round(mk[0][1], 1)) for mk in fuera]))
+        if a.roi:
+            print("ROI %s: %d de %d marcas dentro" % (roi_mm, len(dentro), len(marks)))
+        marks = dentro
+        if len(marks) < marks_wanted:
+            sys.exit("quedan %d marcas de las %d pedidas dentro de %s.\n"
+                     "Lo normal es que falten por(tags de calibracion de por "
+                     "medio): acota con --roi x0,y0,x1,y1 en mm.\n"
+                     "Si las que sobran estan FUERA de la caja, la homografia "
+                     "extrapola mal ahi: repite 'calibrate' con puntos "
+                     "repartidos por TODA la cama, esquinas incluidas."
+                     % (len(marks), marks_wanted, (x0, y0, x1, y1)))
+        if marks_wanted == 2:
+            a_, b_ = pick_pair(marks)
+            marks = [a_, b_]
+        else:
+            marks = marks[:marks_wanted]
+        for i, ((mx, my), (u, v)) in enumerate(marks, 1):
+            print("marca %d: %.3f, %.3f mm (px %.1f, %.1f)" % (i, mx, my, u, v))
+            if a.no_move:
+                out.append((mx, my))
+                continue
+            m.goto(mx, my)
+            pos = fine(m, head, cfg, a)
+            out.append(pos)
+        ox, oy = cfg["cam_offset_mm"]
+        print("\ncoordenadas para el modulo Print and Cut de LightBurn:")
+        for i, (x, y) in enumerate(out, 1):
+            print("  marca %d:  X = %.3f   Y = %.3f" % (i, x + ox, y + oy))
+        save_txt(out, cfg, a)
+    finally:
+        for c in (top, head):
+            c.release()
+        try:
+            pass  # el teclado no tiene comando de stop: se suelta con keyup
+        except Exception as e:
+            print("AVISO: stop no enviado: %s" % e)
+        m.close()
+
+
+def center_roi(w, h, frac=0.35):
+    """Caja centrada, dentro del frame. Con el driver dando una resolucion
+    distinta a la pedida, un pad calculado sobre w se sale de h y numpy lee
+    el indice negativo desde el final."""
+    pad = int(min(w, h) * frac)
+    return (max(0, w // 2 - pad), max(0, h // 2 - pad),
+            min(w, w // 2 + pad), min(h, h // 2 + pad))
+
+
+def fine(m, head, cfg, a):
+    """Recentra la marca con la camara del cabezal. Devuelve la posicion real."""
+    fov = cfg["head_fov_mm"]
+    for i in range(a.iters):
+        g = grab(head, a.frames)
+        # medida sobre el frame real, no sobre la res que pedimos
+        h, w = g.shape
+        roi = center_roi(w, h)
+        found = find_marks(g, roi=roi, min_area=cfg["min_area"],
+                           max_area=cfg["max_area"], thr=cfg["thr"])
+        if not found:
+            print("  iter %d: no veo la marca, reviso iluminacion/FOV" % (i + 1))
+            return m.pos() or (0.0, 0.0)
+        u, v, area = found[0]
+        # la camara puede estar girada o espejada: por eso los signos son config
+        dx = (u - w / 2.0) * fov / w * cfg["head_flip_x"]
+        dy = (v - h / 2.0) * fov / w * cfg["head_flip_y"]
+        print("  iter %d: offset %.3f, %.3f mm (px %.1f, %.1f, area %d)"
+              % (i + 1, dx, dy, u, v, area))
+        if math.hypot(dx, dy) < a.tol:
+            print("  centrado")
+            return m.pos() or (0.0, 0.0)
+        step = math.hypot(dx, dy)
+        if step > a.max_step:
+            dx, dy = dx * a.max_step / step, dy * a.max_step / step
+            print("  paso recortado a %.2f mm" % a.max_step)
+        # destino absoluto + lazo cerrado: la velocidad de jog es una
+        # rampa, no una constante, asi que un salto abierto de "dx mm"
+        # se queda corto. move_to mide, corrige y vuelve a medir.
+        p = m.pos() or (0.0, 0.0)
+        m.pan.move_to(p[0] - dx, p[1] - dy, tol=a.tol)
+    print("AVISO: no se centro en %d iteraciones" % a.iters)
+    return m.pos() or (0.0, 0.0)
+
+
+def save_txt(out, cfg, a):
+    if not a.emit:
+        return
+    ox, oy = cfg["cam_offset_mm"]
+    with open(a.emit, "w") as f:
+        for i, (x, y) in enumerate(out, 1):
+            f.write("marca %d  X=%.3f  Y=%.3f\n" % (i, x + ox, y + oy))
+    print("coordenadas en %s" % a.emit)
+
+
+def cmd_scan(a):
+    """En Windows el indice depende del orden de conexion: hay que ver cual es cual.
+    Abre cada indice, guarda una foto y dice la resolucion real."""
+    seen = []
+    for idx in range(a.max_idx):
+        cap = None
+        for be in BACKENDS:
+            cap = cv2.VideoCapture(idx, be)
+            if cap.isOpened():
+                break
+            cap.release()
+        if not cap.isOpened():
+            continue
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        ok, f = None, None
+        for _ in range(8):
+            ok, f = cap.read()
+            if ok:
+                break
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if ok:
+            path = os.path.join(HERE, "scan_idx%d.png" % idx)
+            cv2.imwrite(path, f)
+            g = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+            # huella: dice si la camara ve algo o solo el tapon
+            seen.append((idx, w, h, path))
+            print("indice %d: %dx%d  brillo %.0f  contraste %.0f  nitidez %.0f"
+                  "  ->  %s" % (idx, w, h, g.mean(), g.std(),
+                                cv2.Laplacian(g, cv2.CV_64F).var(),
+                                os.path.basename(path)))
+        else:
+            print("indice %d: abre pero no entrega imagen (%dx%d)" % (idx, w, h))
+        cap.release()
+    print("\n%d camaras. Mira los scan_idx*.png y pon el indice de la cenital "
+          "en top_cam y el del cabezal en head_cam (calib.json)." % len(seen))
+    print("Si las IMX179 dan dos resoluciones distintas, no las confundas: "
+          "la del cabezal es la que va montada en el cabezal.")
+
+
+def cmd_cams(a):
+    cfg = load_cfg()
+    cfg["res"] = [a.width, a.height]
+    if a.top is not None:
+        cfg["top_cam"] = a.top
+    if a.head is not None:
+        cfg["head_cam"] = a.head
+    top, head = open_cam(cfg, "top"), open_cam(cfg, "head")
+    # ambas a la misma altura, y el conjunto reducido para que quepa en pantalla
+    win = "vision hibrida"
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+    print("q para salir")
+    try:
+        while True:
+            ok1, f1 = top.read()
+            ok2, f2 = head.read()
+            if not ok1 or not ok2:
+                break
+            hh = min(f1.shape[0], f2.shape[0])
+            pan = []
+            for f, name, key in ((f1, "cenital", "top"), (f2, "cabezal", "head")):
+                p = cv2.resize(f, (int(f.shape[1] * hh / f.shape[0]), hh))
+                # etiqueta propia: si un panel sale negro o no se ve, se sabe cual
+                cv2.putText(p, "%s  idx%d  %dx%d"
+                            % (name, cfg[key + "_cam"], p.shape[1], hh),
+                            (10, 28), 0, 0.8, (0, 255, 255), 2)
+                pan.append(p)
+            v = np.hstack(pan)
+            if v.shape[1] > 1600:
+                v = cv2.resize(v, (1600, int(v.shape[0] * 1600 / v.shape[1])))
+            cv2.imshow(win, v)
+            if (cv2.waitKey(30) & 0xFF) in (ord("q"), 27):
+                break
+    finally:
+        top.release()
+        head.release()
+        cv2.destroyAllWindows()
+
+
+def test_mirar():
+    """Recorre mirar() entero sin camara, que es la unica forma de probar el
+    mando de las flechas. Todo lo de OpenCV (imshow, namedWindow, waitKey) se
+    sustituye por una lista de teclas guionizada; lo demas -- grab, escalado,
+    el circulo de la H invertida y el pulso que sale en la Ruida -- se ejecuta
+    de verdad. Sin esto, la unica forma de saber si una flecha va al eje
+    correcto es mover el cabezal de verdad, y ya ha fallado dos veces por
+    codigo sin que salte ningun error."""
+
+    pulsos = []
+
+    class Pan:
+        def hold(self, d, ms):
+            pulsos.append((d, ms))
+
+    class Maq:
+        cfg = {"H": [1, 0, 0, 0, 1, 0, 0, 0, 1], "res": [1920, 1080]}
+        pan = Pan()
+
+        def pos(self, t=1.0):
+            return (200.0, 100.0)
+
+    class Cap:
+        def __init__(self, h, w):
+            self.im = np.full((h, w, 3), 128, np.uint8)
+
+        def read(self):
+            return True, self.im
+
+    # +X, 's' (pasa a 3.4 mm), +X, -Y, luego la forma extendida de una
+    # flecha (ARROW_EXT y a continuacion el scan code) y Enter.
+    teclas = [0x270000, ord(VEL_KEY), 0x270000, 0x280000, ARROW_EXT, 0x4B, 13]
+    n_teclas = len(teclas)
+    vistas = []
+    orig = cv2.imshow, cv2.namedWindow, cv2.destroyWindow, cv2.waitKey
+    msvcrt_orig = msvcrt
+    globals()["msvcrt"] = None      # el guion lo lleva cv2.waitKey
+    cv2.namedWindow = lambda *a, **k: None
+    cv2.imshow = lambda w, im: vistas.append(im)
+    cv2.destroyWindow = lambda *a: None
+    cv2.waitKey = lambda d: teclas.pop(0) if teclas else -1
+    try:
+        r = mirar(Maq(), Cap(720, 1280), Cap(1080, 1920), 1, 6, verbose=False)
+    finally:
+        cv2.imshow, cv2.namedWindow, cv2.destroyWindow, cv2.waitKey = orig
+        globals()["msvcrt"] = msvcrt_orig
+
+    assert r == "accept", r
+    # La velocidad arranca en el indice 1 (0.44 mm) y 's' la lleva al 2.
+    assert pulsos == [("+X", 20), ("+X", 100), ("-Y", 100), ("-X", 100)], pulsos
+
+    # Las dos camaras a la misma altura, lado a lado con el separador.
+    assert len(vistas) == n_teclas - 1, (len(vistas), n_teclas)
+    assert vistas[0].shape == (720, 1280 + 6 + 1280, 3), vistas[0].shape
+    # Con H identidad, 200,100 mm cae dentro del frame cenital: tiene que
+    # haberse dibujado el circulo rojo.
+    assert ((vistas[0][:, :, 2] > 200) & (vistas[0][:, :, 0] < 60)).any(), \
+        "no se dibujo el circulo de la posicion del cabezal"
+
+    # 'q' sale sin mover nada.
+    teclas[:] = [ord("q")]
+    pulsos[:] = []
+    orig = cv2.imshow, cv2.namedWindow, cv2.destroyWindow, cv2.waitKey
+    msvcrt_orig = msvcrt
+    globals()["msvcrt"] = None      # el guion lo lleva cv2.waitKey
+    cv2.namedWindow = lambda *a, **k: None
+    cv2.imshow = lambda w, im: None
+    cv2.destroyWindow = lambda *a: None
+    cv2.waitKey = lambda d: teclas.pop(0) if teclas else -1
+    try:
+        r = mirar(Maq(), Cap(720, 1280), Cap(1080, 1920), 1, 6, verbose=False)
+    finally:
+        cv2.imshow, cv2.namedWindow, cv2.destroyWindow, cv2.waitKey = orig
+        globals()["msvcrt"] = msvcrt_orig
+    assert r == "q" and pulsos == [], (r, pulsos)
+
+    # Y lo mismo pero pulsando desde la CONSOLA, que es la mitad del arreglo:
+    # msvcrt devuelve '\xe0' y luego el scan code. '\xe0'+'P' es la izquierda,
+    # y en msvcrt la izquierda es P, no K como en OpenCV.
+    class Consola:
+        def __init__(self, scrip):
+            self.buf = list(scrip)
+
+        def kbhit(self):
+            return bool(self.buf)
+
+        def getwch(self):
+            return self.buf.pop(0)
+
+    teclas[:] = []
+    pulsos[:] = []
+    msvcrt_orig = msvcrt
+    globals()["msvcrt"] = Consola(["\xe0", "P", "q"])
+    orig = cv2.imshow, cv2.namedWindow, cv2.destroyWindow, cv2.waitKey
+    cv2.namedWindow = lambda *a, **k: None
+    cv2.imshow = lambda w, im: None
+    cv2.destroyWindow = lambda *a: None
+    cv2.waitKey = lambda d: -1        # la ventana no ve nada: manda la consola
+    try:
+        r = mirar(Maq(), Cap(720, 1280), Cap(1080, 1920), 1, 6, verbose=False)
+    finally:
+        cv2.imshow, cv2.namedWindow, cv2.destroyWindow, cv2.waitKey = orig
+        globals()["msvcrt"] = msvcrt_orig
+    assert pulsos == [("-X", 20)], pulsos
+    assert r == "q", r
+
+    # Un prefijo huerfano (flecha cuyo segundo byte no llega) NO se puede
+    # comer la tecla siguiente. Antes la w desaparecia detras de la flecha.
+    globals()["msvcrt"] = Consola(["\xe0", "w", "q"])
+    pulsos[:] = []
+    orig = cv2.imshow, cv2.namedWindow, cv2.destroyWindow, cv2.waitKey
+    cv2.namedWindow = lambda *a, **k: None
+    cv2.imshow = lambda w, im: None
+    cv2.destroyWindow = lambda *a: None
+    cv2.waitKey = lambda d: -1
+    try:
+        r = mirar(Maq(), Cap(720, 1280), Cap(1080, 1920), 1, 6, verbose=False)
+    finally:
+        cv2.imshow, cv2.namedWindow, cv2.destroyWindow, cv2.waitKey = orig
+        globals()["msvcrt"] = msvcrt_orig
+    assert pulsos == [("+Y", 20)], ("la w se perdio tras el prefijo", pulsos)
+
+    # Y las letras, que es como se mueve de verdad: W A S D. Llegan en un solo
+    # golpe y en mayusculas tambien, por si el Bloq Mayus esta puesto.
+    class Simple:
+        def __init__(s2, scrip):
+            s2.buf = list(scrip)
+
+        def kbhit(s2):
+            return bool(s2.buf)
+
+        def getwch(s2):
+            return s2.buf.pop(0)
+
+    pulsos[:] = []
+    globals()["msvcrt"] = Simple(list("waSD" + VEL_KEY + "dq"))
+    orig = cv2.imshow, cv2.namedWindow, cv2.destroyWindow, cv2.waitKey
+    cv2.namedWindow = lambda *a, **k: None
+    cv2.imshow = lambda w, im: None
+    cv2.destroyWindow = lambda *a: None
+    cv2.waitKey = lambda d: -1
+    try:
+        r = mirar(Maq(), Cap(720, 1280), Cap(1080, 1920), 1, 6, verbose=False)
+    finally:
+        cv2.imshow, cv2.namedWindow, cv2.destroyWindow, cv2.waitKey = orig
+        globals()["msvcrt"] = msvcrt_orig
+    # w +Y, a -X, S -Y (mayuscula tambien), D +X, luego la v sube el paso a
+    # 100 ms y la d siguiente ya sale a 3.4 mm. La v sola no mueve, por eso
+    # hace falta una letra detras para ver que el cambio surtio.
+    assert pulsos == [("+Y", 20), ("-X", 20), ("-Y", 20), ("+X", 20),
+                      ("+X", 100)], pulsos
+    assert r == "q", r
+
+    # El caso que de verdad fallaba: el prefijo '\xe0' y el scan code NO
+    # llegan en el mismo instante. getwch() con el buffer vacio devuelve "" y
+    # la flecha se perdia en silencio. Este guion saca el prefijo y aun tiene
+    # que pasar por un kbhit() en falso antes de dar el scan code.
+    class ConsolaTarda:
+        """El scan code no esta ahi todavia: la consola dice que no hay nada
+        un par de veces seguidas, que es como llega de verdad."""
+
+        def __init__(self):
+            self.buf = ["\xe0", "P", "q"]
+            self.polls = 0
+
+        def kbhit(self):
+            if not self.buf:
+                return False
+            if self.buf[0] == "\xe0":
+                self.polls += 1
+                if self.polls < 3:        # el segundo byte aun no ha llegado
+                    return False
+            return True
+
+        def getwch(self):
+            return self.buf.pop(0)
+
+    teclas[:] = []
+    pulsos[:] = []
+    msvcrt_orig = msvcrt
+    globals()["msvcrt"] = ConsolaTarda()
+    orig = cv2.imshow, cv2.namedWindow, cv2.destroyWindow, cv2.waitKey
+    cv2.namedWindow = cv2.imshow = cv2.destroyWindow = lambda *a, **k: None
+    cv2.waitKey = lambda d: -1
+    try:
+        r = mirar(Maq(), Cap(720, 1280), Cap(1080, 1920), 1, 6, verbose=False)
+    finally:
+        cv2.imshow, cv2.namedWindow, cv2.destroyWindow, cv2.waitKey = orig
+        globals()["msvcrt"] = msvcrt_orig
+    assert pulsos == [("-X", 20)], ("scan code tardio", pulsos)
+    assert r == "q", r
+    print("teclado: OK (WASD y flechas, ventana de OpenCV y consola, "
+          "con el scan code tardio)")
+    print("mirar: OK (4 ejes por letra y por flecha, v cambia de paso, circulo rojo, q sale)")
+
+
+
+def cmd_test(a):
+    import ruida as r
+    r.selftest()
+    # homografia sintetica: px -> mm lineal + traslacion
+    T = np.array([[0.12, 0.03, 40.0], [-0.02, 0.11, 25.0], [0, 0, 1]], np.float32)
+    src = [(100, 200), (1800, 200), (100, 1000), (1800, 1000), (900, 600)]
+    mm = [cv2.perspectiveTransform(np.array([[[u, v]]], np.float32), T)[0, 0]
+          for u, v in src]
+    H, e_max, _, _ = fit_homography(src, mm)
+    for (u, v), want in zip(src, mm):
+        got = px_to_mm(H, (u, v))
+        assert math.dist(got, (want[0], want[1])) < 1e-3, (got, want)
+    print("homografia: OK (%d puntos, error max %.2e mm)" % (len(src), e_max))
+    g = np.full((1080, 1920), 255, np.uint8)
+    for u, v in ((300, 200), (960, 540)):
+        cv2.circle(g, (u, v), 6, 0, -1)
+    found = find_marks(g, min_area=8)
+    assert len(found) == 2, found
+    for u, v, _ in found:
+        want = min(((300, 200), (960, 540)), key=lambda w: math.dist((u, v), w))
+        assert math.dist((u, v), want) < 0.01, (u, v, want)
+    print("deteccion: OK (2 marcas, centro subpixel)")
+    # El tag de LightBurn es un aro con la cruz dentro: dos blobs con el mismo
+    # centroide. merge tiene que devolver UNA marca en el centro, no dos.
+    for r in (10, 20, 30):
+        g = np.full((400, 600), 255, np.uint8)
+        cv2.circle(g, (300, 200), r, 0, 2, cv2.LINE_AA)
+        a = r // 2
+        cv2.line(g, (300 - a, 200), (300 + a, 200), 0, 2, cv2.LINE_AA)
+        cv2.line(g, (300, 200 - a), (300, 200 + a), 0, 2, cv2.LINE_AA)
+        assert len(find_marks(g, merge=0)) == 2, ("sin merge deben ser 2", r)
+        f = find_marks(g, merge=6)
+        assert len(f) == 1, ("aro r=%d px -> %d marcas" % (r, len(f)))
+        assert math.dist(f[0][:2], (300, 200)) < 0.5, (r, f)
+    # tags separados no se fusionan
+    g = np.full((400, 600), 255, np.uint8)
+    for cx in (120, 480):
+        cv2.circle(g, (cx, 200), 20, 0, 2, cv2.LINE_AA)
+    assert len(find_marks(g, merge=6)) == 2
+    print("tag aro+cruz: OK (1 marca a cualquier radio, 2 tags separados = 2)")
+    # el driver dio 1280x720 y no lo que pedimos: la ROI tiene que caber igual
+    for w, h in ((1920, 1080), (1280, 720), (640, 480), (320, 240)):
+        x0, y0, x1, y1 = center_roi(w, h)
+        assert 0 <= x0 < x1 <= w and 0 <= y0 < y1 <= h, (w, h, center_roi(w, h))
+    # 720p con pad sobre w daba y0 negativo: numpy lo leeria desde el final
+    x0, y0, x1, y1 = center_roi(1280, 720)
+    assert y0 > 0 and (y1 - y0) > 100, center_roi(1280, 720)
+    print("ROI: OK (caja centrada y dentro del frame en 4 resoluciones)")
+
+    # El filtro de la caja de la maquina descarta los tags que la homografia
+    # extrapola fuera de la cama. Ojo: SAFE va como (x0, x1, y0, y1) y desempaquetarlo
+    # como (x0, y0, x1, y1) hace que TODO salga fuera. Este test lo caza.
+    # ("r" esta reasignado por un for de mas arriba, se usa el modulo)
+    sx0, sx1, sy0, sy1 = ruida.Panel.SAFE
+    assert (sx0, sx1, sy0, sy1) == (0.0, 500.0, 0.0, 400.0), ruida.Panel.SAFE
+    dentro = lambda mm: (sx0 <= mm[0] <= sx1 and sy0 <= mm[1] <= sy1)
+    assert dentro((250.0, 200.0)), "un punto en mitad de cama tiene que entrar"
+    assert not dentro((599.073, 412.221)), "fuera de la caja tiene que salir"
+    assert not dentro((477.532, -4.142)), "y por Y negativa tambien"
+    print("filtro de caja: OK (dentro 250,200 entra; 599,412 y 477,-4.1 salen)")
+
+    # El mapeo de las flechas falla en silencio: si una tecla no esta
+    # reconocida el cabezal no se mueve y no sale ningun error. Por eso se
+    # saca el VK de la palabra alta en vez de escribir los numeros enteros, que
+    # dependen de como OpenCV los empaquete. Las dos formas conocidas, mas la
+    # extendida, y que las letras no se confundan con flechas.
+    assert _flecha(0x250000, False) == "-X" and _flecha(0x270000, False) == "+X"
+    assert _flecha(0x260000, False) == "+Y" and _flecha(0x280000, False) == "-Y"
+    assert _flecha(0x25004B, False) == "-X"        # VK con el scan debajo
+    assert _flecha(0x4B, True) == "-X" and _flecha(0x4D, True) == "+X"
+    assert _flecha(0x48, True) == "+Y" and _flecha(0x50, True) == "-Y"
+    # 0x48 y 0x4B son H y K en mayusculas: sin la pista de ARROW_EXT una letra
+    # moveria el cabezal. Y una tecla normal no es flecha.
+    assert _flecha(0x48, False) is None and _flecha(0x4B, False) is None
+    assert _flecha(ord("H"), False) is None and _flecha(0, False) is None
+    # Los scan codes de msvcrt son otros: la izquierda es P y abajo S, no K y P.
+    assert MS_SCAN == {0x48: "+Y", 0x50: "-X", 0x4D: "+X", 0x53: "-Y"}, MS_SCAN
+    assert SCAN[0x4B] == "-X" and SCAN[0x50] == "-Y" and MS_SCAN[0x50] == "-X"
+    assert SCAN[0x50] == "-Y" and MS_SCAN[0x53] == "-Y"
+    assert len(STEP_MS) == len(STEP_MM) and STEP_MM[0] < STEP_MM[-1]
+    assert _escala(np.zeros((720, 1280, 3), np.uint8), 360).shape[:2] == (360, 640)
+    # Todas las formas en las que puede llegar una flecha tienen que mapear a
+    # los cuatro ejes, que si no decide el build de OpenCV de cada uno.
+    for cod in (0x250000, 0x25004B, 0x25):
+        assert _flecha(cod, False) == "-X", hex(cod)      # izquierda
+    assert _flecha(0x270000, False) == "+X", "derecha"
+    assert _flecha(0x260000, False) == "+Y", "arriba"
+    assert _flecha(0x280000, False) == "-Y", "abajo"
+    # Teclado numerico con NumLock apagado, que tambien son flechas.
+    assert _flecha(0x22, False) == "-X" and _flecha(0x23, False) == "+X"
+    assert _flecha(0x21, False) == "+Y" and _flecha(0x24, False) == "-Y"
+    assert _flecha(0x4B, True) == "-X" and _flecha(0x50, True) == "-Y"
+    print("flechas: OK (WASD, VK en la palabra alta y forma extendida, "
+          "4 ejes, pasos 0.2/0.44/3.4 mm)")
+
+    # El circulo rojo del cabezal dibuja con la H invertida, y
+    # perspectiveTransform devuelve 2D (hace la division por la tercera
+    # coordenada DENTRO), no 3. Dividirla a mano da IndexError. Se comprueba
+    # la forma y el valor, que es como se manifesto el fallo.
+    Hc = np.array([[0.5, 0.0, 10.0], [0.0, 0.5, 20.0], [0.0, 0.0, 1.0]])
+    # Hinv toma mm y devuelve px, que es como se usa con la posicion del
+    # cabezal. 80 mm -> 2*(80-10) = 140 px, y 80 mm -> 2*(80-20) = 120 px.
+    q = cv2.perspectiveTransform(np.array([[[80.0, 80.0]]], np.float64),
+                                 np.linalg.inv(Hc))[0, 0]
+    assert q.shape == (2,), ("perspectiveTransform no devuelve 3 coords", q.shape)
+    assert abs(q[0] - 140.0) < 1e-6 and abs(q[1] - 120.0) < 1e-6, q
+    print("H invertida: OK (2 coordenadas, sin division a mano)")
+    test_mirar()
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--width", type=int, default=DEFAULTS["res"][0])
+    ap.add_argument("--height", type=int, default=DEFAULTS["res"][1])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    c = sub.add_parser("calibrate", help="homografia pixel -> mm")
+    c.add_argument("--park", help="X,Y del estacionamiento, p.ej. 20,20")
+    c.add_argument("--top", type=int, help="indice de la camara cenital")
+    c.add_argument("--points", type=int, default=6)
+    c.add_argument("--frames", type=int, default=3)
+    c.add_argument("--manual", action="store_true",
+                   help="escribir X Y a mano en vez de leerlos de la Ruida")
+    c.add_argument("--no-watch", action="store_true",
+                   help="no mostrar la camara del cabezal como puntero")
+
+    f = sub.add_parser("fov", help="medir el campo de vision de la camara del cabezal")
+    f.add_argument("--frames", type=int, default=3)
+
+    r = sub.add_parser("run", help="flujo Print and Cut")
+    r.add_argument("--marks", type=int, help="numero de marcas (2 por defecto)")
+    r.add_argument("--roi", help="ROI en mm de maquina: x0,y0,x1,y1. Acota "
+                   "donde buscar marcas cuando hay tags de por medio")
+    r.add_argument("--iters", type=int, default=4)
+    r.add_argument("--tol", type=float, default=0.1,
+                   help="mm de centrado (0.1 es lo que converge: el paso minimo\n                         del jog es 0.2 mm, 0.05 no llega)")
+    r.add_argument("--max-step", type=float, default=2.0, help="mm por iteracion")
+    r.add_argument("--frames", type=int, default=3)
+    r.add_argument("--debug", action="store_true", help="volcar marcas detectadas")
+    r.add_argument("--no-move", action="store_true", help="no mover el cabezal")
+    r.add_argument("--emit", help="fichero .txt con las coordenadas finales")
+
+    v = sub.add_parser("cams", help="vista dual en vivo")
+    v.add_argument("--top", type=int, help="indice de la camara cenital")
+    v.add_argument("--head", type=int, help="indice de la camara del cabezal")
+    s = sub.add_parser("scan", help="listar todas las camaras y guardar una foto de cada una")
+    s.add_argument("--max-idx", type=int, default=8)
+    sub.add_parser("test", help="autocomprobado")
+    a = ap.parse_args()
+    return {"calibrate": cmd_calibrate, "run": cmd_run, "cams": cmd_cams,
+            "scan": cmd_scan, "fov": cmd_fov, "test": cmd_test}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main() or 0)
+    except KeyboardInterrupt:
+        # La q de la calibracion y el Ctrl+C llegan aqui. Cerrar las ventanas
+        # antes, o el proceso se queda vivo con la ventana en pantalla.
+        cv2.destroyAllWindows()
+        print("\ncancelado")
+        sys.exit(130)
