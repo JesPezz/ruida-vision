@@ -103,60 +103,11 @@ class _Tee:
         pass
 
 
-class ToolTip(tk.Label):
-    """Etiqueta flotante de los botones de icono.
-
-    Sale a los 600 ms de dejar el raton encima, no antes: un tooltip que
-    aparece de inmediato va y viene mientras se busca el boton. Se va sola al
-    salir y se lleva el raton, porque si no tapa justo el boton de al lado."""
-
-    def __init__(self, w, texto):
-        super().__init__(w, text=texto, background="#fffbe6", foreground="#222222",
-                         relief="solid", borderwidth=1, padx=6, pady=3,
-                         font=("Segoe UI", 9), justify="left")
-        self._t = None
-        self._x = self._y = 0
-
-    def _enseguida(self):
-        self._t = None
-        self.place(x=self._x, y=self._y)
-        self.lift()
-
-    def mostrar(self, e=None):
-        if e is not None:
-            self._x, self._y = e.x_root + 12, e.y_root + 18
-        if self._t is None:
-            self._t = self.after(600, self._enseguida)
-
-    def ocultar(self):
-        if self._t is not None:
-            self.after_cancel(self._t)
-            self._t = None
-        self.place_forget()
-
-    def mover(self, e):
-        self._x, self._y = e.x_root + 12, e.y_root + 18
-        if self._t is None and self.winfo_ismapped():  # ya sale: que siga
-            self.place(x=self._x, y=self._y)
-            self.lift()
-
-    def _ligar(self, w):
-        """Se engancha al widget que se avisa (un boton, un Canvas de icono)."""
-        w.bind("<Enter>", self.mostrar, add="+")
-        w.bind("<Motion>", self.mover, add="+")
-        w.bind("<Leave>", self.ocultar, add="+")
-
-
-def boton(padre, icono, accion, leyenda, **kw):
-    """Boton de icono con su leyenda en tooltip.
-
-    Los botones con nombre ocupaban media barra y no se leian cuando la ventana
-    se estrecha; el icono deja la barra entera para lo que importa y la
-    leyenda se lee al parar el raton encima."""
-    b = ttk.Button(padre, text=icono, command=accion,
-                   **dict({"width": 3}, **kw))
-    ToolTip(b, leyenda)._ligar(b)
-    return b
+def boton(padre, texto, accion=None, **kw):
+    """Boton con su nombre encima. Los iconos se probaron y estorbaban: con la
+    ventana estrecha habia que adivinar, y el nombre cabe en la barra sin
+    problema. Sin adornos ni tooltips: lo que dice el boton es lo que hace."""
+    return ttk.Button(padre, text=texto, command=accion, **kw)
 
 
 class Video(threading.Thread):
@@ -415,9 +366,9 @@ class App(tk.Tk):
         self.lbl_ota = ttk.Label(f, text="", style="Chico.TLabel", wraplength=560,
                                  justify="left")
         self.lbl_ota.grid(row=0, column=0, sticky="w")
-        boton(f, "⟳", self.ota, "Buscar actualizaciones").grid(row=0, column=1,
-                                                               sticky="e", padx=(8, 0))
-        boton(f, "▤", self.abrir_log, "Abrir el registro en el editor").grid(
+        boton(f, "Buscar actualizaciones", self.ota).grid(
+            row=0, column=1, sticky="e", padx=(8, 0))
+        boton(f, "Ver registro", self.abrir_log).grid(
             row=0, column=2, sticky="e", padx=(6, 0))
 
     # -------------------------------------------------------------- fontaneria
@@ -478,33 +429,37 @@ class App(tk.Tk):
         self.i_vivo = self.hojas.index(h)
         b = ttk.Frame(h)
         b.pack(fill="x")
-        for icono, accion, leyenda in (
-                ("⌂", self.park, "Estacionamiento: llevar el cabezal a la esquina"),
-                ("◉", self.conectar, "Conectar las camaras"),
-                ("○", self.parar_cams, "Desconectar las camaras"),
-                ("⏹", self.stop, "Parar el motor"),
-                ("⊕", lambda: self.ir_a(0.0, 0.0), "Origen: ir a 0,0 mm"),
-                ("◫", self.scan_cams, "Buscar camaras conectadas y guardarlas"),
-        ):
-            boton(b, icono, accion, leyenda).pack(side="left", padx=2)
+        # Los botones van en grid y en dos filas, no en un pack de una: con los
+        # nombres encima todo en una fila pedia 1500 px y en una ventana de 1200
+        # el ultimo boton ("Buscar camaras") quedaba fuera, sin verse. Wrap por
+        # filas, que es lo que hace la gente en papel.
+        for col, (nombre, accion) in enumerate((
+                ("Estacionar", self.park),
+                ("Conectar camaras", self.conectar),
+                ("Desconectar", self.parar_cams),
+                ("Parar", self.stop),
+                ("Origen 0,0", lambda: self.ir_a(0.0, 0.0)),
+                ("Buscar camaras", self.scan_cams),
+        )):
+            boton(b, nombre, accion).grid(row=0, column=col, padx=2, sticky="w")
         # El paso, como en LightBurn: un numero que se sube y se baja con -/+
         # en saltos de 0.1, sin desplegable. El desplegable obligaba a soltar el
         # WASD justo cuando hace falta el paso fino, que es con el cabezal en
         # la mano.
-        ttk.Label(b, text="paso (toque):", style="Chico.TLabel").pack(
-            side="left", padx=(18, 2))
-        boton(b, "−", lambda: self._cambia_paso(-1),
-              "Bajar el paso del toque 0.1 mm (tecla -)").pack(side="left")
+        ttk.Label(b, text="paso (toque):", style="Chico.TLabel").grid(
+            row=1, column=0, padx=(0, 2), sticky="w", pady=(4, 0))
+        boton(b, "−", lambda: self._cambia_paso(-1)).grid(
+            row=1, column=1, sticky="w", pady=(4, 0))
         self.lbl_paso = ttk.Label(b, text="", width=9, anchor="center",
                                   font=("Consolas", 11))
-        self.lbl_paso.pack(side="left", padx=2)
-        boton(b, "+", lambda: self._cambia_paso(1),
-              "Subir el paso del toque 0.1 mm (tecla +)").pack(side="left")
+        self.lbl_paso.grid(row=1, column=2, padx=2, sticky="w", pady=(4, 0))
+        boton(b, "+", lambda: self._cambia_paso(1)).grid(
+            row=1, column=3, sticky="w", pady=(4, 0))
         self._pon_paso(0.5)
-        ttk.Label(b, text="mantener = continuo", style="Chico.TLabel").pack(
-            side="left", padx=(10, 0))
+        ttk.Label(b, text="mantener = continuo", style="Chico.TLabel").grid(
+            row=1, column=4, padx=(10, 0), sticky="w", pady=(4, 0))
         self.lbl_dir = ttk.Label(b, text="", style="Chico.TLabel")
-        self.lbl_dir.pack(side="left", padx=18)
+        self.lbl_dir.grid(row=1, column=5, padx=18, sticky="w", pady=(4, 0))
 
         self.lbl_pos = ttk.Label(h, text="posicion: -", font=("Consolas", 11))
         self.lbl_pos.pack(anchor="w", pady=(6, 0))
@@ -518,11 +473,8 @@ class App(tk.Tk):
         m = ttk.Frame(h)
         m.pack(fill="x")
         ttk.Label(m, text="Mover:", style="Chico.TLabel").pack(side="left", padx=(0, 8))
-        for icono, d, leyenda in (("▲", "+Y", "Mover en +Y  (tecla W)"),
-                                  ("▶", "+X", "Mover en +X  (tecla D)"),
-                                  ("▼", "-Y", "Mover en -Y  (tecla S)"),
-                                  ("◀", "-X", "Mover en -X  (tecla A)")):
-            b2 = boton(m, icono, None, leyenda, width=4)
+        for d in ("+Y", "+X", "-Y", "-X"):
+            b2 = boton(m, d)
             b2.bind("<ButtonPress-1>", lambda e, d=d: self._toque(d))
             b2.bind("<ButtonRelease-1>", lambda e: self._suelta())
             b2.pack(side="left", padx=2)
@@ -696,23 +648,6 @@ class App(tk.Tk):
         self._tarea(self.maq.get().goto, x, y)
 
     # ------------------------------------------------------ hoja "calibrar"
-    def _icono_camara(self, padre, cmd, tam=24):
-        """El boton de capturar, dibujado a mano: en Windows un emoji sale en
-        blanco o en monochrome segun la fuente, esto sale siempre."""
-        c = tk.Canvas(padre, width=tam, height=tam, highlightthickness=0,
-                      background="white", cursor="hand2")
-        c.create_rectangle(1, tam * 0.40, tam - 1, tam - 2, outline="black")
-        c.create_rectangle(tam * 0.30, 1, tam * 0.60, tam * 0.45,
-                           fill="black", outline="black")
-        r = tam * 0.26
-        c.create_oval(tam / 2 - r, tam * 0.68 - r, tam / 2 + r, tam * 0.68 + r,
-                      outline="black", width=2)
-        c.bind("<Button-1>", lambda e: cmd())
-        c.bind("<Enter>", lambda e: c.configure(background="#dbeafe"))
-        c.bind("<Leave>", lambda e: c.configure(background="white"))
-        ToolTip(c, "Congelar la foto de la cenital con sus manchas")._ligar(c)
-        return c
-
     def _hoja_calibrar(self):
         self.prompt = ""
         h = ttk.Frame(self.hojas, padding=8)
@@ -720,23 +655,26 @@ class App(tk.Tk):
         self.i_cal = self.hojas.index(h)
         b = ttk.Frame(h)
         b.pack(fill="x")
-        boton(b, "⌂", self.cal_park,
-              "1. Estacionamiento: el cabezal se va a la esquina antes de medir").pack(
-            side="left", padx=2)
-        self._icono_camara(b, self.cal_foto).pack(side="left", padx=(6, 2))
-        for icono, cmd, leyenda in (("✓", self.cal_ajusta,
-                                     "Ajustar la homografia con los puntos y guardarla"),
-                                    ("⌦", self.cal_quita, "Quitar el punto marcado"),
-                                    ("✕", self.cal_limpia, "Borrar todos los puntos"),
-                                    ("⟳", self.fov_foto, "Medir el FOV de la camara del cabezal"),
-                                    ("⊕", self.off_pregun, "Offset del laser respecto al cabezal")):
-            boton(b, icono, cmd, leyenda).pack(side="left", padx=2)
+        # Igual que en Vivo: dos filas, porque los nombres en una sola pedian
+        # 1650 px y el ultimo boton se salia de la ventana.
+        for col, (nombre, cmd) in enumerate((
+                ("1. Estacionar", self.cal_park),
+                ("Congelar foto", self.cal_foto),
+                ("2. Ajustar H", self.cal_ajusta),
+                ("Quitar punto", self.cal_quita))):
+            boton(b, nombre, cmd).grid(row=0, column=col, padx=2, sticky="w")
+        for col, (nombre, cmd) in enumerate((
+                ("Borrar puntos", self.cal_limpia),
+                ("3. Medir FOV", self.fov_foto),
+                ("4. Offset laser", self.off_pregun))):
+            boton(b, nombre, cmd).grid(row=1, column=col, padx=2, sticky="w",
+                                       pady=(3, 0))
         self.lbl_fov = ttk.Label(b, text="", style="Chico.TLabel")
-        self.lbl_fov.pack(side="left", padx=6)
+        self.lbl_fov.grid(row=1, column=3, padx=6, sticky="w", pady=(3, 0))
         self._fov_muestra()
         ttk.Label(b, text="  el clic en la foto guarda el punto solo; en la tabla, "
-                           "Supr quita el marcado", style="Chico.TLabel").pack(
-            side="left", padx=10)
+                           "Supr quita el marcado", style="Chico.TLabel").grid(
+            row=2, column=0, padx=10, sticky="w", pady=(3, 0))
 
         cuerpo = ttk.PanedWindow(h, orient="horizontal")
         cuerpo.pack(fill="both", expand=True, pady=6)
@@ -765,10 +703,8 @@ class App(tk.Tk):
                   font=("Segoe UI", 10, "bold")).pack(anchor="w")
         nb = ttk.Frame(d)
         nb.pack(fill="x", pady=(2, 2))
-        boton(nb, "#", self.cal_numero,
-              "Poner el numero al punto marcado (el de la tabla)").pack(side="left")
-        boton(nb, "⇅", self.cal_reordena,
-              "Renumerar 1, 2, 3... por el orden de la tabla").pack(side="left", padx=3)
+        boton(nb, "Marcar con numero", self.cal_numero).pack(side="left")
+        boton(nb, "Renumerar", self.cal_reordena).pack(side="left", padx=3)
         self.tabla = ttk.Treeview(d, columns=("n", "px", "py", "x", "y"), show="headings",
                                   height=16)
         for c, t, w in (("n", "n", 32), ("px", "px", 58), ("py", "py", 58),
@@ -1106,21 +1042,19 @@ class App(tk.Tk):
         b.pack(fill="x")
         self.lbl_marcas = ttk.Label(b, text="", style="Ok.TLabel")
         self.lbl_marcas.pack(side="left")
-        boton(b, "◎", self.detectar, "Detectar los dos puntos de la plantilla "
-              "(no mueve el cabezal)").pack(side="left", padx=(8, 2))
-        self.btn_mover = boton(b, "➜", self.mover_marca,
-                               "Mover el cabezal al punto 1")
+        boton(b, "Detectar los dos puntos", self.detectar).pack(
+            side="left", padx=(8, 2))
+        self.btn_mover = boton(b, "Mover", self.mover_marca)
         self.btn_mover.pack(side="left", padx=2)
-        boton(b, "▶", self.run_marcas, "Todo de una vez: detectar, mover a los dos "
-              "y afinar con la camara del cabezal").pack(side="left", padx=(14, 2))
+        boton(b, "Todo de una vez", self.run_marcas).pack(side="left", padx=(14, 2))
         self.v_marcas = self._ent(b, "marcas", 2)
         self.v_it = self._ent(b, "iteraciones", 4)
         self.v_tol = self._ent(b, "tolerancia mm", "0.1")
         ttk.Label(b, text="  ROI mm x0,y0,x1,y1:").pack(side="left", padx=(16, 3))
         self.v_roi = ttk.Entry(b, width=24)
         self.v_roi.pack(side="left", padx=4)
-        boton(b, "▤", self.abrir_coords, "Abrir coords.txt").pack(side="right")
-        boton(b, "⧉", self.copiar, "Copiar todas las coordenadas al portapapeles").pack(
+        boton(b, "Ver coords.txt", self.abrir_coords).pack(side="right")
+        boton(b, "Copiar coordenadas", self.copiar).pack(
             side="right", padx=4)
 
         # Lo que se copia a mano en LightBurn: la posicion REAL que tiene el
@@ -1188,11 +1122,11 @@ class App(tk.Tk):
         vuelta a empezar. Que se lea lo que toca evita el paso de "¿ahora que
         botón era?"."""
         if not self.marcas2:
-            self.btn_mover.configure(text="➜", state="disabled")
+            self.btn_mover.configure(text="Mover", state="disabled")
             return
         i = self.i_marca
         self.btn_mover.configure(
-            text="Mover %d" % (i + 1) if i < len(self.marcas2) else "➜",
+            text="Mover %d" % (i + 1) if i < len(self.marcas2) else "Mover",
             state="normal")
 
     def mover_marca(self):
@@ -1369,9 +1303,9 @@ class App(tk.Tk):
             e.insert(0, ", ".join(str(x) for x in v) if isinstance(v, (list, tuple)) else str(v))
             e.grid(row=r, column=1, sticky="w", pady=3)
             self.campos[clave] = e
-        boton(f, "✓", self.guardar_cfg, "Guardar los ajustes").grid(row=9, column=1,
+        boton(f, "Guardar ajustes", self.guardar_cfg).grid(row=9, column=1,
                                                                     sticky="w", pady=10)
-        boton(f, "◫", self.scan_cams, "Listar las camaras conectadas").grid(row=9, column=0,
+        boton(f, "Listar camaras", self.scan_cams).grid(row=9, column=0,
                                                                              sticky="w", pady=10)
         ttk.Label(f, text="Si cambias el indice de una camara hay que desconectar y "
                           "volver a conectar (o reiniciar la app) para que se abra la "

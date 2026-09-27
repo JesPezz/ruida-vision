@@ -315,7 +315,8 @@ def main():
         anchos[1] - anchos[0] <= 0.05 * anchos[1]
         and app.foto.winfo_width() > anchos[1])
 
-    # Los botones llevan icono y leyenda flotante (punto 3).
+    # Los botones llevan su nombre encima, no un icono. Se probaron los iconos
+    # con tooltip y estorbaban: con la ventana estrecha habia que adivinar.
     def todos(w, acc=None):
         acc = [] if acc is None else acc
         for c in w.winfo_children():
@@ -323,29 +324,42 @@ def main():
             todos(c, acc)
         return acc
     cosas = todos(app)
-    iconos = [w for w in cosas if w.winfo_class() == "TButton"
-              and len(w.cget("text")) <= 3]
-    tips = [w for w in cosas if isinstance(w, A.ToolTip)]
-    chk("los botones de las hojas son iconos con leyenda flotante",
-        len(iconos) >= 6 and len(tips) >= len(iconos)
-        and all(len(t.cget("text")) > 6 for t in tips))
-    t0 = tips[0]
-    # La hoja de la leyenda puede estar oculta (esta comprueba el gestor, no
-    # el pixel: asi vale para los 30 botones sin desocultar 4 hojas).
-    ev = type("E", (), {"x_root": 10, "y_root": 20})()
-    t0.mostrar(ev)
-    chk("la leyenda no sale hasta que el raton se para",
-        t0.winfo_manager() != "place" and t0._t is not None)
-    t0._enseguida()
+    bts = [w for w in cosas if w.winfo_class() == "TButton"]
+    nombres = [w.cget("text") for w in bts]
+    Iconos = set("⌂◉○⏹⊕◫⧉▤⟳◎➜▶▲▼◀✓⌦✕⇅# ")
+    chk("los botones llevan el nombre, no un icono",
+        len(bts) >= 20 and not hasattr(A, "ToolTip")
+        and not hasattr(app, "_icono_camara")
+        and not (set(nombres) & Iconos)
+        and {"Estacionar", "Renumerar", "Ver coords.txt", "Guardar ajustes"}
+        <= set(nombres))
+    chk("los botones de mover dicen el eje (+Y, +X, -Y, -X)",
+        [t for t in nombres if t in ("+Y", "+X", "-Y", "-X")] == ["+Y", "+X", "-Y", "-X"])
+    app._boton_mover()
+    chk("Mover avisa de que no hay puntos", app.btn_mover.cget("text") == "Mover"
+        and "disabled" in str(app.btn_mover.state()))
+
+    # Ningun boton puede quedar fuera de la ventana: con los iconos cabia todo,
+    # y al volver a los nombres los ultimos se salian sin verse. Se mide de
+    # verdad, con la ventana ya colocada.
+    app.hojas.select(0)
     app.update()
-    chk("la leyenda sale al parar el raton encima",
-        t0.winfo_manager() == "place")
-    t0.mover(ev)
-    chk("la leyenda sigue al raton mientras sale", t0.winfo_manager() == "place")
-    t0.ocultar()
+    app.geometry("1200x780")
     app.update()
-    chk("la leyenda se va al salir el raton",
-        t0.winfo_manager() != "place" and t0._t is None)
+    chopped = {}
+    medidos = 0
+    for pos in range(len(app.hojas.tabs())):
+        app.hojas.select(pos)
+        app.update()
+        for w in todos(app):
+            if w.winfo_class() != "TButton" or not w.winfo_ismapped():
+                continue
+            medidos += 1
+            if w.winfo_rootx() - app.winfo_rootx() + w.winfo_width() > app.winfo_width():
+                chopped.setdefault(app.hojas.tab(pos, "text").strip(), []).append(
+                    w.cget("text"))
+    chk("ningun boton se sale de la ventana de 1200 px (%d mirados, fuera: %s)"
+        % (medidos, chopped or "ninguno"), not chopped and medidos >= 20)
 
     # - y + eligen el paso de toque sin soltar el WASD, en saltos de 0.1 mm.
     chk("el paso de toque es un numero, no un desplegable",

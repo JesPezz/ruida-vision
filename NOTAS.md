@@ -3,7 +3,7 @@
 Estado: **v1.7, la v1.6 más los siete ajustes que salieron de usarla en la máquina.**
 Todo lo de abajo está verificado (`py -u hybrid_vision.py test`, `python ruida.py test`,
 `/root/venv/bin/python -m ruidavision.actualizar test`, y
-`/root/venv/bin/python -m ruidavision.prueba_app` → 0 fallos de 61 comprobaciones).
+`/root/venv/bin/python -m ruidavision.prueba_app` → 0 fallos de 60 comprobaciones).
 Lo que queda es lo que solo se puede comprobar con la máquina delante, y está al final.
 
 ## 0. Lo de esta versión (v1.7)
@@ -16,10 +16,18 @@ Lo que queda es lo que solo se puede comprobar con la máquina delante, y está 
    Ruida no distingue un pulso de un keyup, así que un paso más fino es
    indistinguible de "no mover". El `jog` de la CLI **no** cambia: sigue con su
    ciclo de tres pasos, es otro uso.
-2. **Botones con icono y leyenda flotante** (`ToolTip` + `boton()`). La leyenda es
-   un `tk.Label` que se coloca con `place` a los 600 ms de parar el ratón, y se
-   esconde con `place_forget()`. Ojo: `withdraw()`/`deiconify()` son de `Wm`, y un
-   Label no es toplevel — con `withdraw()` reventaba al construir la app.
+2. **Los botones llevan su nombre encima, no un icono.** Se probó lo contrario (icono
+   + `ToolTip` con `place`/`place_forget()`) y fue un error: hay que parar el ratón y
+   esperar 600 ms para leer qué hace un botón, y con la app en marcha eso no pasa.
+   Fuera `ToolTip`, `_ligar()` y el botón de cámara dibujado a mano. `boton()` es
+   ahora solo un `ttk.Button` con el texto y la acción.
+   Al poner los nombres, las barras de **Vivo** y **Calibrar** pedían 1500 y 1650 px en
+   una ventana de 1200, y los últimos botones quedaban **fuera sin verse**: ahora esas
+   barras van en `grid` de dos filas (Vivo: acciones arriba, paso abajo; Calibrar:
+   4 botones arriba, 3 abajo y el texto de ayuda en su fila) y miden 875 y 1519 px. La
+   prueba mide los 26 botones de las cuatro hojas y falla si alguno se sale de los
+   1200 px. Los `−`/`+` del paso y los `+Y/+X/-Y/-X` se quedan: su texto ya es su
+   nombre.
 3. **La botonera del log va en `grid`**, no en un `pack` encadenado: los botones de
    arriba del registro ya no se comían la última línea del log.
 4. **Calibrar reparte los tres visores** (`_marco` con `weight`): las dos cámaras
@@ -33,10 +41,11 @@ Lo que queda es lo que solo se puede comprobar con la máquina delante, y está 
    dejaron fuera. `cmd_run` y la hoja Marcas usan el mismo helper: el criterio no
    puede ser distinto según por dónde se entre.
 6. **Print and Cut sin portapapeles** (`detectar` → `mover_marca` → `_fin_punto`):
-   `detectar` no mueve el cabezal, deja los dos puntos a la vista; `➜` va al
-   punto 1, se lee la posición en grande y se anota a mano en LightBurn; `➜` otra
+   `detectar` no mueve el cabezal, deja los dos puntos a la vista; `Mover` va al
+   punto 1, se lee la posición en grande y se anota a mano en LightBurn; `Mover` otra
    vez va al punto 2 y avisa de que el offset de LightBurn debe quedar
-   desactivado. El mismo botón va cambiando de texto ("Mover 1" → "Mover 2" → "➜").
+   desactivado. El mismo botón va cambiando de texto ("Mover 1" → "Mover 2" →
+   "Mover"), y se queda en `disabled` mientras no haya puntos.
    La posición que se enseña es la del cabezal **más** `cam_offset_mm` en el punto
    1 (donde se pulsa el botón en la app) y la de la máquina en el punto 2 (donde se
    anota en LightBurn).
@@ -51,9 +60,11 @@ Lo que queda es lo que solo se puede comprobar con la máquina delante, y está 
 
 - `pick_pair` devuelve la **pareja** `(a, b)`. Envolverla en lista dejaba una tupla
   dentro y petaba al desempaquetar. Lo caza la prueba de la app.
-- `boton()` con `width` explícito reventaba por `multiple values for keyword`;
-  ahora el `width=3` por defecto se pisa con `dict({"width": 3}, **kw)`.
-- `ToolTip` con `withdraw()`: método de `Wm`, no existe en `Label`.
+- `boton()` con `width` explícito reventaba por `multiple values for keyword`. Al
+  quitar los iconos también se fue el `width` por defecto que lo pisaba: ahora
+  `boton(padre, texto, accion=None, **kw)` pasa `**kw` tal cual.
+- La leyenda con `withdraw()` reventaba al construir la app (`withdraw` es de `Wm`, y
+  un `Label` no es toplevel). Ya no hay leyenda: los nombres van en el botón.
 - `os.path.getsize(ruta)` en el log de la descarga reventaba si el fichero no llegó
   a crearse; ahora se registra 0 bytes en vez de morir.
 
@@ -96,9 +107,9 @@ Lo que queda es lo que solo se puede comprobar con la máquina delante, y está 
    posición en medio: una rampa de aceleración por cada 3,4 mm. Ahora jiro continuo a
    ~5 mm/s con corte por destino (`jog_hold(corte=...)` + `_ir_hacia`), y el paso fino
    se queda para el último milímetro.
-4. **Calibrar: cámara y foto.** Al entrar en la pestaña se ve la cámara en directo, el
-   botón de foto es un icono de cámara, y con una captura ya congelada el visor ya no
-   se pisa: el botón pasa a guardar. `hay_foto` es lo que decide.
+4. **Calibrar: cámara y foto.** Al entrar en la pestaña se ve la cámara en directo, y
+   con una captura ya congelada el visor ya no se pisa: el botón pasa de **Congelar
+   foto** a guardar. `hay_foto` es lo que decide.
 5. **Numeración de las manchas.** La columna "n" manda: `cal_ajusta` empareja por
    número (antes por orden de lista, con las manchas cambiadas de sitio), hay
    "Cambiar n°" para renumerar a mano, "Renumerar" ordena por número y renumera 1..N,
@@ -168,15 +179,15 @@ cabe en pantalla.
 Lo de la v1.7, en este orden:
 
 - **El flujo de Print and Cut, a pelo**: centrar la plantilla, `◎ Detectar los dos
-  puntos`, `➜` al punto 1, anotar en LightBurn, `➜` al punto 2, anotar. La posición
+  puntos`, `Mover` al punto 1, anotar en LightBurn, `Mover` al punto 2, anotar. La posición
   que sale en grande tiene que coincidir con la que marca el cabezal ahí. Luego:
   en LightBurn, offset **desactivado**.
 - **`-` y `+` con el cabezal en la mano**: 0,1 mm se nota como un roce, 10 mm se
   nota de golpe, y ni un paso se queda sin mover.
 - **El instalador de verdad**: Ajustes → Actualizar, y comprobar que la app se
   cierra, aparece el instalador y arranca. Antes solo se descargaba.
-- Las leyendas de los botones: que se lean y que no se queden puestas al mover el
-  ratón a otro botón.
+- Los nombres de los botones: que se lean todos en la pantalla de verdad, sobre todo
+  "4. Offset laser" y "Copiar coordenadas", que son los que más se Acercan al borde.
 
 Lo de antes, igual:
 
@@ -209,7 +220,7 @@ python ruida.py test                                      # protocolo del panel,
 py hybrid_vision.py calibrate --park 20,20                # ventana con las 2 cámaras
 
 # App de escritorio (en la Pi hace falta xvfb-run: no tiene escritorio real)
-/root/venv/bin/python -m ruidavision.prueba_app           # 61 comprobaciones de GUI y jog
+/root/venv/bin/python -m ruidavision.prueba_app           # 60 comprobaciones de GUI y jog
 /root/venv/bin/python -m ruidavision.actualizar test      # 13 del descargador y el arranque
 ```
 

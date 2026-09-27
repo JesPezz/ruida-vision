@@ -22,8 +22,9 @@ Siete ajustes que salieron de usar la v1.6 con la máquina delante:
 
   milisegundos de pulsado con los tres puntos medidos (0,2 / 0,44 / 3,4 mm) y un
   mínimo de 1 ms, por debajo del cual la controladora no distingue el pulso.
-- **Los botones llevan icono y una leyenda flotante** que sale al parar el ratón
-  encima. Con iconos solos no se sabía qué era qué.
+- **Los botones llevan su nombre encima**, sin iconos: se probó con icono y leyenda
+  flotante y había que parar el ratón y esperar medio segundo para saber qué hacía
+  cada uno. Los nombres se reparten en dos filas donde no caben en una.
 - **Calibrar reparte la hoja**: las dos cámaras en vivo ocupan la parte de arriba
   y la foto congelada, la de abajo, en una fila a todo lo ancho. Antes la
   congelada se comía la hoja y las cámaras en vivo salían en una franja.
@@ -33,7 +34,7 @@ Siete ajustes que salieron de usar la v1.6 con la máquina delante:
   `hybrid_vision.py`** (`marcas_utiles`). Es lo que evita que el par elegido sea un
   tag y una mancha del borde en vez de las dos marcas del material.
 - **Print and Cut sin copiar y pegar.** Con los dos puntos a la vista, el botón
-  `➜` va al primero; se anota a mano la posición que da el cabezal; vuelve a
+  `Mover` va al primero; se anota a mano la posición que da el cabezal; vuelve a
   pulsar y va al segundo. El paso 2 avisa de que el offset de LightBurn debe
   quedar **desactivado**, porque aquí ya se ha tenido en cuenta.
 - **La actualización se ejecuta de verdad.** Descargar el `.exe` ya no se quedaba
@@ -83,8 +84,8 @@ Lo que se arregló en esta versión, con lo medido en esta máquina:
   3,4 mm. Ahora va en jiro continuo a ~5 mm/s y se reserva el paso fino para el
   último milímetro, con corte por destino.
 - **En Calibrar, la cámara en directo y la foto.** Al entrar en la pestaña se ve la
-  cámara en directo en el visor, y el botón de foto es un icono de cámara. Con una
-  captura ya congelada, el visor ya no se pisa: el botón pasa a guardar.
+  cámara en directo en el visor, y el botón se llama **Congelar foto**. Con una captura
+  ya congelada, el visor ya no se pisa: el botón pasa a guardar.
 - **Numerar las manchas de calibración.** La columna "n" de la tabla de Calibrar es
   el número de verdad, no el orden de la lista: se puede renumerar a mano
   ("Cambiar n°"), "Renumerar" ordena por número y renumera 1..N, y `cal_ajusta`
