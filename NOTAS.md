@@ -79,11 +79,13 @@ cabe en pantalla.
 (Inno Setup 6), y `ruidavision/actualizar.py` (OTA contra `releases/latest` de GitHub).
 
 Queda por hacer / comprobar:
-- Publicar la **release v1.1** en GitHub: el tag `v1.0` apunta un commit por detrás de
-  `main` y no hay release publicada, así que el OTA todavía no encuentra nada. Bumpear
-  `VERSION` en `ruidavision/__init__.py` antes de empaquetar.
 - El techo de **5 mm/s es del perfil de LightBurn** ("Config maquina jog lento"); no se
   puede cambiar desde aquí porque `set_param` no hace nada (README 319-323).
+
+El **repo es público** a propósito: `actualizar.py` no lleva token (solo biblioteca
+estándar, a propósito), y contra un repo privado la API devuelve 404 aunque exista la
+release. Con el repo público, `releases/latest` responde sin autenticar y el instalador
+se descarga sin sesión.
 
 ## Cómo probar
 
