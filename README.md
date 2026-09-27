@@ -10,6 +10,13 @@ hybrid_vision.py  cámaras, detección de marcas, homografía y flujo Print and 
 calib.json        se crea solo en `calibrate` (cámaras, FOV, homografía H, puntos)
 ```
 
+## Qué cambió en la v1.8
+
+- **Los botones vuelven a llevar su nombre.** En la v1.7 se les puso icono con leyenda
+  flotante y fue mala idea: para saber qué hacía un botón había que parar el ratón y
+  esperar medio segundo, y en mitad de un trabajo eso no pasa. Los nombres van en dos
+  filas donde no caben en una, para que ninguno quede fuera de la ventana.
+
 ## Qué cambió en la v1.7
 
 Siete ajustes que salieron de usar la v1.6 con la máquina delante:

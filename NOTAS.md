@@ -1,12 +1,13 @@
 # Notas para la próxima sesión
 
-Estado: **v1.7, la v1.6 más los siete ajustes que salieron de usarla en la máquina.**
+Estado: **v1.8, que es la v1.7 con los botones nombrados (y las barras en dos filas
+para que los nombres quepan).** La v1.7 son los siete ajustes de usarla en la máquina.
 Todo lo de abajo está verificado (`py -u hybrid_vision.py test`, `python ruida.py test`,
 `/root/venv/bin/python -m ruidavision.actualizar test`, y
 `/root/venv/bin/python -m ruidavision.prueba_app` → 0 fallos de 60 comprobaciones).
 Lo que queda es lo que solo se puede comprobar con la máquina delante, y está al final.
 
-## 0. Lo de esta versión (v1.7)
+## 0. Lo de esta versión (v1.7 y v1.8)
 
 1. **El paso es un número en mm, no un desplegable** (`self.paso_mm`, `lbl_paso`,
    `_pon_paso`, `_cambia_paso`): `-` y `+` lo mueven en saltos de 0,1 mm entre
