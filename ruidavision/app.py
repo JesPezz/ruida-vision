@@ -21,6 +21,7 @@ import contextlib
 import os
 import queue
 import sys
+import tempfile
 import threading
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
@@ -277,6 +278,7 @@ class App(tk.Tk):
         self.maq = Maquina()
         self.video = None
         self.puntos = []                 # [(px, py, X mm, Y mm)]
+        self.numeros = []                # numero que dice cada punto (1, 2, 3...)
         self.fovpts = []
         self.modo = None                 # None | "fov"
         self.coords = []
@@ -289,6 +291,7 @@ class App(tk.Tk):
         self._jog_t = None               # la pulsacion se esta volviendo continua
         self._jog_p = None               # parada pendiente (debounce del repeat)
         self._jog_ev = None              # Event del continuo en curso
+        self.hay_foto = False            # hay foto congelada en Calibrar
 
         self._estilo()
         self._cabecera()
@@ -299,6 +302,7 @@ class App(tk.Tk):
         self._hoja_marcas()
         self._hoja_ajustes()
         self._pie()
+        self.hojas.bind("<<NotebookTabChanged>>", self._al_cambiar_hoja)
         self.protocol("WM_DELETE_WINDOW", self.salir)
         self.bind("<KeyPress>", self._tecla)
         self.bind("<KeyRelease>", self._suelta_tecla)
@@ -594,15 +598,35 @@ class App(tk.Tk):
         self._tarea(self.maq.get().goto, x, y)
 
     # ------------------------------------------------------ hoja "calibrar"
+    def _icono_camara(self, padre, cmd, tam=20):
+        """El boton de capturar, dibujado a mano: en Windows un emoji sale en
+        blanco o en monochrome segun la fuente, esto sale siempre."""
+        c = tk.Canvas(padre, width=tam, height=tam, highlightthickness=0,
+                      background="white", cursor="hand2")
+        c.create_rectangle(1, tam * 0.40, tam - 1, tam - 2, outline="black")
+        c.create_rectangle(tam * 0.30, 1, tam * 0.60, tam * 0.45,
+                           fill="black", outline="black")
+        r = tam * 0.26
+        c.create_oval(tam / 2 - r, tam * 0.68 - r, tam / 2 + r, tam * 0.68 + r,
+                      outline="black", width=2)
+        c.bind("<Button-1>", lambda e: cmd())
+        c.bind("<Enter>", lambda e: c.configure(background="#dbeafe"))
+        c.bind("<Leave>", lambda e: c.configure(background="white"))
+        return c
+
     def _hoja_calibrar(self):
         self.prompt = ""
         h = ttk.Frame(self.hojas, padding=8)
         self.hojas.add(h, text="  Calibrar  ")
+        self.i_cal = self.hojas.index(h)
         b = ttk.Frame(h)
         b.pack(fill="x")
-        for txt, cmd in (("1 Estacionamiento", self.cal_park),
-                         ("2 Congelar foto", self.cal_foto),
-                         ("Ajustar y guardar", self.cal_ajusta),
+        ttk.Button(b, text="1 Estacionamiento", command=self.cal_park).pack(
+            side="left", padx=3)
+        self._icono_camara(b, self.cal_foto).pack(side="left", padx=(6, 1))
+        ttk.Label(b, text="= 2 Congelar foto", style="Chico.TLabel").pack(
+            side="left", padx=(2, 8))
+        for txt, cmd in (("Ajustar y guardar", self.cal_ajusta),
                          ("Quitar punto", self.cal_quita),
                          ("Borrar puntos", self.cal_limpia)):
             ttk.Button(b, text=txt, command=cmd).pack(side="left", padx=3)
@@ -623,6 +647,11 @@ class App(tk.Tk):
         cuerpo.add(d, weight=1)
         ttk.Label(d, text="Puntos:  pixel de la cenital = maquina",
                   font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        nb = ttk.Frame(d)
+        nb.pack(fill="x", pady=(2, 2))
+        ttk.Button(nb, text="Numerar el marcado", command=self.cal_numero).pack(side="left")
+        ttk.Button(nb, text="Renumerar 1,2,3...", command=self.cal_reordena).pack(
+            side="left", padx=3)
         self.tabla = ttk.Treeview(d, columns=("n", "px", "py", "x", "y"), show="headings",
                                   height=16)
         for c, t, w in (("n", "n", 32), ("px", "px", 58), ("py", "py", 58),
@@ -689,6 +718,7 @@ class App(tk.Tk):
         g, d = fu.result()
         if g is not None:
             self.foto.poner(g, d)
+            self.hay_foto = True           # a partir de aqui es foto fija
             # El recuento va debajo del aviso: es la respuesta a "las ha visto o
             # no". Las de la camara del cabezal no son marcas, asi que ahi solo
             # se cuentan como referencia de que la foto tiene contraste.
@@ -725,6 +755,10 @@ class App(tk.Tk):
             return
         x, y, p = r
         self.puntos.append((x, y, p[0], p[1]))
+        n = 1                              # el libre mas bajo, no len(): tras
+        while n in self.numeros:           # borrar un punto, len() repetiria
+            n += 1
+        self.numeros.append(n)
         self._retabla()
         self.lbl_cal.configure(text="Punto %d:  pixel (%.0f, %.0f) = maquina "
                                    "(%.3f, %.3f). Repite en otro sitio de la cama."
@@ -735,10 +769,24 @@ class App(tk.Tk):
             self.lbl_cal.configure(text="hacen falta 4 puntos como minimo, y 6 mejor",
                                    style="Mal.TLabel")
             return
+        # La homografia no mira los numeros, mira el ORDEN de la lista. Los
+        # numeros solo sirven para saber cual es el 1 y cual el 2 cuando hay
+        # manchas de mas, asi que avisa si no cuadran en vez de dejar que el
+        # error salga 300 fotos mas tarde como una reproyeccion rara.
+        if sorted(self.numeros) != list(range(1, len(self.puntos) + 1)):
+            self.lbl_cal.configure(
+                text="numeros %s: no son 1, 2, 3... Numera a mano o pulsa "
+                     "Renumerar" % sorted(self.numeros), style="Mal.TLabel")
+            return
 
         def f():
-            px = [p[:2] for p in self.puntos]
-            mm = [p[2:] for p in self.puntos]
+            # el numero manda: la mancha marcada como 1 se empareja con la
+            # primera coordenada de la maquina, la 2 con la segunda... Sin esto
+            # el ajuste empareja por orden de lista, que es como salen las
+            # manchas, y el 1 y el 2 acababan cambiados de sitio.
+            pares = sorted(zip(self.numeros, self.puntos))
+            px = [p[:2] for _, p in pares]
+            mm = [p[2:] for _, p in pares]
             H, e_max, e_avg, malos = hv.fit_homography(px, mm)
             if H is None:
                 return "No queda modelo: puntos mas separados y clic en el centro de la mancha."
@@ -767,12 +815,58 @@ class App(tk.Tk):
 
     def _retabla(self):
         self.tabla.delete(*self.tabla.get_children())
-        for i, (px, py, mx, my) in enumerate(self.puntos, 1):
-            self.tabla.insert("", "end", values=("%d" % i, "%.0f" % px, "%.0f" % py,
-                                                 "%.3f" % mx, "%.3f" % my))
+        for i, (px, py, mx, my) in enumerate(self.puntos):
+            self.tabla.insert("", "end", values=("%d" % self.numeros[i], "%.0f" % px,
+                                                 "%.0f" % py, "%.3f" % mx, "%.3f" % my))
+
+    def cal_numero(self):
+        """Pide que numero es el punto MARCADO en la tabla.
+
+        Los reflejos y la luz dejan manchas de mas, y el punto de verdad esta
+        amontonado con ellas. Como los seis puntos se leen en el ORDEN de la
+        lista, y ese orden es el que sale de la foto, no hay forma de
+        arreglarlo borrando: hay que poder decirle a cada fila que numero es.
+        Asi el punto 1 puede ser la fila 40.
+        """
+        sel = self.tabla.selection()
+        if not sel:
+            self.lbl_cal.configure(text="marca antes una fila de la tabla",
+                                   style="Mal.TLabel")
+            return
+        n = simpledialog.askinteger("Numero de punto", "Este punto es el numero:",
+                                    minvalue=1, initialvalue=1, parent=self)
+        if n is None:
+            return
+        # los indices se leen ANTES de _retabla(): al repintar se borran las
+        # filas y los ids viejos dejan de existir
+        filas = [self.tabla.index(s) for s in sel]
+        for i in filas:
+            self.numeros[i] = n
+        otros = sum(1 for k, v in enumerate(self.numeros)
+                    if v == n and k not in set(filas))
+        self._retabla()
+        self.lbl_cal.configure(
+            text="punto %d de la lista = numero %d%s"
+                 % (filas[0] + 1, n,
+                    "   OJO: ese numero lo tiene tambien otro punto" if otros else ""),
+            style="Mal.TLabel" if otros else "Chico.TLabel")
+
+    def cal_reordena(self):
+        """Ordena la lista por el numero puesto a mano y renumera 1, 2, 3...
+
+        Asi el orden de la tabla y el emparejamiento con las coordenadas de la
+        maquina son lo mismo, sin depender de en que orden salieran las manchas.
+        """
+        self.puntos = [p for _, p in sorted(zip(self.numeros, self.puntos))]
+        self.numeros = list(range(1, len(self.puntos) + 1))
+        self._retabla()
+        self.lbl_cal.configure(text="ordenado por numero: 1..%d"
+                               % len(self.puntos), style="Chico.TLabel")
 
     def cal_limpia(self):
         self.puntos = []
+        self.numeros = []
+        self.hay_foto = False
         self._retabla()
         self.lbl_cal.configure(text="", style="Chico.TLabel")
 
@@ -787,9 +881,11 @@ class App(tk.Tk):
             # punto n-1. Se borran de mayor a menor para que los indices
             # de los que quedan no se muevan.
             for s in sorted(sel, key=lambda s: self.tabla.index(s), reverse=True):
-                del self.puntos[int(self.tabla.item(s, "values")[0]) - 1]
+                del self.puntos[self.tabla.index(s)]
+                del self.numeros[self.tabla.index(s)]
         elif self.puntos:
             self.puntos.pop()
+            self.numeros.pop()
         self._retabla()
         self.lbl_cal.configure(text="quedan %d puntos" % len(self.puntos),
                                style="Chico.TLabel")
@@ -1033,7 +1129,25 @@ class App(tk.Tk):
                     self._foto(self.im_top, self._con_top(top))
                     self._foto(self.im_head, self._con_head(head))
                     self._cada_paso()
+                    self._visor_cal()
         self.after(33, self._pintar)
+
+    # ------------------------------------------------------- visor de Calibrar
+    def _visor_cal(self):
+        """En la hoja Calibrar, mientras no haya foto congelada, la foto ES un
+        visor en vivo de la cenital. Antes salia a negro al entrar en la hoja y
+        habia que congelar solo para ver donde estas."""
+        if self.hay_foto or self.hojas.index("current") != self.i_cal:
+            return
+        if not self.video or not self.video.is_alive():
+            return
+        n, top, _ = self.video.frame()
+        if top is not None:
+            self.foto.poner(top, [])
+
+    def _al_cambiar_hoja(self, e=None):
+        if self.hojas.index("current") == self.i_cal:
+            self._visor_cal()
 
     def _foto(self, lab, bgr):
         h, w = bgr.shape[:2]
@@ -1111,11 +1225,15 @@ class App(tk.Tk):
         if not messagebox.askyesno("Actualizacion", msg + "\n\nInstalar ahora?"):
             return
         a = actualizar.instalador(rel)
-        ruta = os.path.join(os.path.dirname(a["name"]), a["name"])
+        # en %TEMP% y con el nombre que trae la release. Antes se armaba la ruta
+        # con os.path.dirname del nombre, que en un nombre suelto es "" y dejaba
+        # una ruta relativa: la descarga fallaba y la app se cerraba igual, sin
+        # instalar nada (que es justo lo que se quejaba).
+        ruta = os.path.join(tempfile.gettempdir(), a["name"])
         self.lbl_ota.configure(text="descargando %.0f MB..."
                                % (a.get("size", 0) / 1048576.0))
         self._tarea(self._baja, a["browser_download_url"], ruta,
-                    al_terminar=lambda fu: self.salir())
+                    al_terminar=self._ota_lanza)
 
     def _baja(self, url, ruta):
         for tot in actualizar.descargar(url, ruta):
@@ -1124,6 +1242,19 @@ class App(tk.Tk):
             self.log("descargados %.0f MB" % (tot / 1048576.0))
         actualizar.lanzar(ruta)
         return True
+
+    def _ota_lanza(self, fu):
+        """Cierra la app SOLO si la descarga y el lanzamiento salieron bien."""
+        try:
+            if not fu.result():
+                raise IOError("no se pudo instalar")
+        except Exception as e:
+            self.lbl_ota.configure(text="fallo la actualizacion: %s" % e)
+            messagebox.showerror("Actualizacion",
+                                 "No se pudo instalar la actualizacion:\n\n%s\n\n"
+                                 "La app sigue como estaba." % e)
+            return
+        self.salir()
 
     # ----------------------------------------------------------------- salida
     def abrir_log(self):

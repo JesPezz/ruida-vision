@@ -13,6 +13,7 @@ import math
 import os
 import socket
 import sys
+import threading
 import time
 
 MAGIC = 0x88
@@ -303,7 +304,7 @@ class Panel:
         self.s.sendall(bytes([0xA5, 0x51, self.JOG[key]]))
 
     def jog_hold(self, key, parar, margen=10.0, poll=0.08, max_ms=120000.0,
-                 verbose=True):
+                 verbose=True, corte=None):
         """Mantiene la tecla pulsada hasta que `parar` (threading.Event) se
         active.
 
@@ -315,6 +316,11 @@ class Panel:
 
         El tope de `max_ms` es un backstop por si el informe de posicion se
         queda pegado: a 5 mm/s no llega a cortar en una cama entera.
+
+        `corte(p)` es opcional y es lo que hace el movimiento grande: se llama
+        con cada posicion y, cuando devuelve True, suelta la tecla. Sin el,
+        el lazo no sabe mas que el tope de viaje, y para ir a un sitio habria
+        que adivinar cuando frenar.
         """
         k = self.JOG[key]
         eje, sube = key[1], key[0] == "+"
@@ -343,6 +349,8 @@ class Panel:
                     if verbose:
                         print("[jog] %s cortado a %.3f mm del tope" % (key, cur))
                     break
+                if corte is not None and corte(p):
+                    break                 # destino alcanzado: no hace falta parar
         finally:
             self.s.sendall(bytes([0xA5, 0x51, k]))
         return p
@@ -362,14 +370,41 @@ class Panel:
             prev = p
         return prev
 
-    def move_to(self, x, y, tol=0.1, tries=80, budget=60.0, verbose=True):
-        """Lleva el cabezal a (x, y) mm por pulsos de jog.
+    def _ir_hacia(self, key, destino, margen=3.0, margen_tope=10.0, poll=0.08):
+        """Jiro continuo en `key` hasta quedarse a `margen` de `destino`.
 
-        Progresivo: pulso largo para la distancia gruesa y de 1 ms para el
-        ultimo milimetro. tol=0.1 mm es lo que converge de forma fiable:
-        el paso minimo es 0.2 mm, asi que con 0.05 el lazo no resuelve el
-        ultimo 0.2 y se queda paseando hasta agotar el presupuesto (medido:
-        2 de 4 objetivos a 0.05 en 41 s; los 4 a 0.1 en 6-15 s).
+        Devuelve la ultima posicion creible, o None si no se pudo. El margen
+        para antes es el de la zona muerta del pulsado corto (0.2 mm) mas lo que
+        se arrastra el informe de posicion; el corte por tope de viaje lo hace
+        `jog_hold`, asi que un destino mal escrito no manda el cabezal contra
+        el tope fisico."""
+        parar = threading.Event()
+        while True:
+            p = self.jog_hold(
+                key, parar, margen=margen_tope, poll=poll, verbose=False,
+                corte=lambda q: abs(destino - (q[0] if key[1] == "X" else q[1]))
+                <= margen)
+            if p is None or not self._ok(p):
+                return None
+            d = destino - (p[0] if key[1] == "X" else p[1])
+            if abs(d) <= margen:
+                return p
+            if (d > 0) != (key[0] == "+"):
+                return p                 # nos pasamos: que lo ajuste el lazo fino
+            parar.set()                   # aun de largo: otro tramo, mismo sentido
+
+    def move_to(self, x, y, tol=0.1, tries=80, budget=60.0, verbose=True):
+        """Lleva el cabezal a (x, y) mm.
+
+        En dos tramos: jiro continuo hasta el vecindario del destino y ajuste
+        fino con pulsos cortos. Antes era todo pulsos de 100 ms (3,4 mm) con
+        una lectura de posicion en medio, y por eso el Origen iba a tirones y
+        tardaba: pagar una rampa de aceleracion por cada 3,4 mm. Con el jiro se
+        va de una vez a ~5 mm/s y el fino se queda para el ultimo milimetro.
+        tol=0.1 mm es lo que converge de forma fiable: el paso minimo es 0.2 mm,
+        asi que con 0.05 el lazo no resuelve el ultimo 0.2 y se queda paseando
+        hasta agotar el presupuesto (medido: 2 de 4 objetivos a 0.05 en 41 s;
+        los 4 a 0.1 en 6-15 s).
         Con topes en las tres cosas: caja de viaje, numero
         de intentos y segundos. Un lazo sin plazo acaba pilotando al cabezal
         contra un tope de recorrido, que es como se perdio la referencia
@@ -390,8 +425,15 @@ class Panel:
             dx, dy = x - p[0], y - p[1]
             if math.hypot(dx, dy) <= tol:
                 return p
+            grueso = abs(dx) > 10 or abs(dy) > 10
             for axis, d in (("X", dx), ("Y", dy)):
                 if abs(d) <= tol:
+                    continue
+                if grueso and abs(d) > 3:
+                    p = self._ir_hacia(("+" if d > 0 else "-") + axis,
+                                       x if axis == "X" else y)
+                    if p is None:
+                        break
                     continue
                 ms = (abs(d) - self.JOG_STEP) / self.JOG_RATE
                 ms = min(self.JOG_MAX_MS, max(1.0, ms))
@@ -525,6 +567,25 @@ def selftest():
     pn.s.sent[:] = []
     pn.jog_hold("+Y", Nadie(), poll=0.01, verbose=False)
     assert pn.s.sent[-1].hex() == "a55104", "ni corto ni solto en el tope"
+    # El tramo grueso de move_to: un solo keydown, corte por destino y no por
+    # tope de viaje (si no, el Origen se iba al final de la cama).
+    pos = [200.0]
+
+    def avanza(t=0):
+        pos[0] += 5.0                    # el cabezal responde al keydown
+        return (pos[0], 200.0)
+    pn.position = avanza
+    corto = []
+    p = pn.jog_hold("+X", Nadie(), poll=0.001, verbose=False,
+                    corte=lambda q: (corto.append(q[0]), q[0] >= 205.0)[1])
+    assert corto, "el corte por destino no se llego a mirar"
+    assert 205.0 <= p[0] < 220.0, ("se paso del destino", p)
+    assert pn.s.sent[-1].hex() == "a55101", "el corte por destino no solto la tecla"
+    # Y el lazo entero: _ir_hacia tiene que devolver la posicion sin quedarse
+    # colgado esperando al tope.
+    pos[0] = 190.0
+    p = pn._ir_hacia("+X", 205.0, margen=3.0, poll=0.001)
+    assert p is not None and abs(p[0] - 205.0) <= 3.0, p
     # el detector de magic tiene que encontrar un magic que no es el de defecto
     moves = b"".join(b"\x89" + enc_rel(dx, dy) for dx, dy in
                      ((4.0, 2.0), (-1.5, 3.0), (2.0, -2.0), (0.5, 0.5),

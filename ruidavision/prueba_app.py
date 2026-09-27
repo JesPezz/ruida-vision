@@ -10,7 +10,9 @@ sacarse de la ventana: lo que se prueba es la aritmetica, no Tk.
 
     py -3 -m ruidavision.prueba_app
 """
+import os
 import sys
+import tempfile
 import threading
 import time
 
@@ -64,6 +66,11 @@ def main():
 
     A.Video = VideoFalso
     app = A.App()
+    # save_cfg falso para TODO el recorrido: si una sola prueba se pasa y
+    # guarda, escribe una H de mentira en el calib.json de la maquina y la
+    # prueba siguiente revienta con Singular matrix. Aki solo se acumula.
+    guardado, save_real = {}, A.hv.save_cfg
+    A.hv.save_cfg = lambda c: guardado.update(c)
     app.update_idletasks()
     print("ventana %dx%d con %d hojas" % (app.winfo_width(), app.winfo_height(),
                                           len(app.hojas.tabs())))
@@ -143,10 +150,8 @@ def main():
     # casilla de al lado, que ya tenia el FOV guardado, y por eso la medida no
     # cuadraba y la segunda vez se comia a si misma. Se falsea save_cfg para no
     # tocar el calib.json de verdad.
-    guardado = {}
-    save_real, load_real = A.hv.save_cfg, A.hv.load_cfg
+    load_real = A.hv.load_cfg
     ask_real = A.simpledialog.askstring
-    A.hv.save_cfg = lambda c: guardado.update(c)
     A.hv.load_cfg = lambda: dict(app.cfg)
     try:
         app.foto.poner(np.zeros((480, 640, 3), "uint8"), [])   # foto fija de 640 px
@@ -187,7 +192,7 @@ def main():
             isinstance(guardado.get("head_fov_mm"), float)
             and abs(guardado["head_fov_mm"] - 31.5) < 1e-9)
     finally:
-        A.hv.save_cfg, A.hv.load_cfg = save_real, load_real
+        A.hv.load_cfg = load_real            # save_cfg sigue falso a proposito
         A.simpledialog.askstring = ask_real
     app.cfg = load_real()
 
@@ -196,15 +201,90 @@ def main():
     # solia caer en medio de la lista, donde "quitar el ultimo" no llegaba.
     app.puntos = [(10.0, 10.0, 0.0, 0.0), (20.0, 20.0, 5.0, 5.0),
                   (30.0, 30.0, 10.0, 10.0)]
+    app.numeros = [1, 2, 3]
     app._retabla()
     app.tabla.selection_set(app.tabla.get_children()[1])       # el de en medio
     app.cal_quita()
     chk("se quita el punto marcado de la tabla, no solo el ultimo",
         app.puntos == [(10.0, 10.0, 0.0, 0.0), (30.0, 30.0, 10.0, 10.0)]
-        and len(app.tabla.get_children()) == 2)
+        and app.numeros == [1, 3] and len(app.tabla.get_children()) == 2)
     app.cal_quita()                                            # sin seleccion: el ultimo
     chk("sin nada marcado quita el ultimo", app.puntos == [(10.0, 10.0, 0.0, 0.0)])
     app.puntos = []
+    app.numeros = []
+
+    # Numerar a mano: con 70 manchas el punto 1 puede ser la fila 40, y sin
+    # esto habia que borrar las 69 de golpe. Ademas "quitar" tiene que seguir
+    # mirando la FILA, no el numero, o al renumerar borraria el punto falso.
+    app.puntos = [(10.0, 10.0, 0.0, 0.0), (20.0, 20.0, 5.0, 5.0),
+                  (30.0, 30.0, 10.0, 10.0)]
+    app.numeros = [1, 2, 3]
+    app._retabla()
+    app.tabla.selection_set(app.tabla.get_children()[1])      # el de en medio
+    A.simpledialog.askinteger = lambda *a, **k: 1        # el de en medio es el 1
+    app.cal_numero()
+    # los ids de fila cambian en cada repintado: se leen por posicion
+    chk("el punto marcado se renumera a mano", app.numeros == [1, 1, 3]
+        and app.tabla.item(app.tabla.get_children()[1], "values")[0] == "1")
+    chk("avisa si el numero ya lo tiene otro",
+        "tambien" in app.lbl_cal.cget("text"))
+    app.tabla.selection_set(app.tabla.get_children()[1])   # ahora SI es el 1
+    app.cal_quita()                                        # -> la fila 1, no la 0
+    chk("quitar mira la fila, no el numero", app.puntos == [(10.0, 10.0, 0.0, 0.0),
+                                                            (30.0, 30.0, 10.0, 10.0)]
+        and app.numeros == [1, 3])
+    app.puntos = [(1.0, 1.0, 0.0, 0.0), (2.0, 2.0, 1.0, 1.0),
+                  (3.0, 3.0, 2.0, 2.0), (4.0, 4.0, 3.0, 3.0)]
+    app.numeros = [1, 2, 3, 5]                  # un 5: no es 1,2,3,4
+    app._retabla()
+    app.cal_ajusta()                                      # numeros sueltos: no ajusta
+    chk("no se ajusta con numeros que no son 1,2,3...",
+        "Renumerar" in app.lbl_cal.cget("text"))
+    A.simpledialog.askinteger = lambda *a, **k: 1
+    app.cal_reordena()
+    chk("renumerar ordena por numero y deja 1,2,3...",
+        app.numeros == [1, 2, 3, 4] and [p[:2] for p in app.puntos]
+        == [(1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0)])
+    app.puntos = []
+    app.numeros = []
+
+    # El visor de Calibrar sale en negro hasta que se congela una foto. Al
+    # entrar en la pestaña tiene queenseñar la camara en directo.
+    app.video = VideoFalso(app.cfg, app.log)
+    app.video.top_im = np.zeros((480, 640, 3), "uint8")
+    app.hay_foto = False
+    app.hojas.select(app.i_cal)
+    app._al_cambiar_hoja()
+    chk("al entrar en Calibrar se ve la camara en directo",
+        getattr(app.foto, "foto", None) is app.video.top_im)
+    app.hay_foto = True                       # con foto congelada, no se pisa
+    app._visor_cal()
+    chk("con foto congelada el visor no se pisa", app.foto.foto is app.video.top_im)
+
+    # La descarga de la OTA se armaba con os.path.dirname del nombre del
+    # adjunto, que en un nombre suelto es "", dejando una ruta RELATIVA: la
+    # descarga fallaba y aun asi se cerraba la app.
+    rutas = []
+    app._tarea = lambda fn, *a, **kw: fn(*a)
+    real = A.actualizar.descargar
+
+    def falsa(url, destino=None):
+        rutas.append(destino)
+        yield None
+    A.actualizar.descargar = falsa
+    real_lanzar = A.actualizar.lanzar
+    A.actualizar.lanzar = lambda ruta: None
+    A.messagebox.askyesno = lambda *a, **k: True
+    app._ota_vuelve(type("F", (), {"result": lambda s: (
+        True, "hay", {"assets": [{"name": "instalar_RuidaVision_9.9.exe",
+                                 "size": 12345, "browser_download_url":
+                                 "https://x/instalar_RuidaVision_9.9.exe"}]})})())
+    A.actualizar.descargar = real
+    A.actualizar.lanzar = real_lanzar
+    chk("la descarga de la OTA va a una ruta absoluta en %TEMP%",
+        bool(rutas) and os.path.isabs(rutas[0])
+        and rutas[0].endswith("instalar_RuidaVision_9.9.exe")
+        and os.path.dirname(rutas[0]) == tempfile.gettempdir())
 
     # Jog: un toque corto da UN paso fino (hold), mantener pasa a continuo
     # (jog_hold) y al soltar se para. Se falsea el panel (para no abrir el
@@ -256,6 +336,7 @@ def main():
     # lo que importa es que el pool quede cerrado y el proceso pueda salir, que
     # es lo que se ve al terminar esta prueba sin que se quede colgada.
     chk("el pool de trabajo queda cerrado", app.pool._shutdown is True)
+    A.hv.save_cfg = save_real          # ya nadie puede escribir el calib.json
     print("app: %d fallos" % len(fallos))
     return 1 if fallos else 0
 

@@ -1,10 +1,33 @@
 # Notas para la próxima sesión
 
-Estado: los **cuatro problemas reportados están arreglados y con tests que los cubren**
-(`py -u hybrid_vision.py test`, 13 líneas OK). Además ya está la **app de escritorio**
-(`ruidavision/`: GUI, instalador de Windows y OTA) y el jog dejó de ir a tirones —
-mantener la tecla o el botón mueve en continuo, un toque corto da un paso fino. Lo que
-queda es lo que solo se puede comprobar con la máquina delante.
+Estado: **v1.5, los cinco problemas reportados arreglados y con pruebas que los cubren.**
+Todo lo de abajo está verificado (`py -u hybrid_vision.py test`, `python ruida.py test`,
+`/root/venv/bin/python -m ruidavision.prueba_app` → 0 fallos). Lo que queda es lo que
+solo se puede comprobar con la máquina delante, y está al final.
+
+## 0. Lo de esta versión (v1.5)
+
+1. **El OTA no descargaba.** La ruta de destino era relativa al `cwd` del ejecutable
+   (bajo `Program Files` no hay permiso) y la app se cerraba igual. Ahora: descarga a
+   `%TEMP%` con ruta absoluta, y solo se cierra si el fichero se ha podido abrir.
+2. **Cámaras lentas.** No era hardware, era `cap.set(CAP_PROP_FOURCC)` después de
+   abrir: el driver se queda en YUY2 (3,7 MB/fotograma a 1080p). Medido con la cenital
+   de esta máquina: 8,4 s al primer fotograma y 2,2 fps así; pidiendo MJPG + resolución
+   + fps en el constructor, 0,9 s hasta abrir, 0,03 s al primer fotograma y 24,9 fps.
+   La cenital **entrega 1280x720 aunque se le pida 1920x1080** (avisa y sigue con la
+   real, que la homografía se escala por `frame/cal`).
+3. **Origen a tirones.** `move_to` era todo pulsos de 100 ms (3,4 mm) con lectura de
+   posición en medio: una rampa de aceleración por cada 3,4 mm. Ahora jiro continuo a
+   ~5 mm/s con corte por destino (`jog_hold(corte=...)` + `_ir_hacia`), y el paso fino
+   se queda para el último milímetro.
+4. **Calibrar: cámara y foto.** Al entrar en la pestaña se ve la cámara en directo, el
+   botón de foto es un icono de cámara, y con una captura ya congelada el visor ya no
+   se pisa: el botón pasa a guardar. `hay_foto` es lo que decide.
+5. **Numeración de las manchas.** La columna "n" manda: `cal_ajusta` empareja por
+   número (antes por orden de lista, con las manchas cambiadas de sitio), hay
+   "Cambiar n°" para renumerar a mano, "Renumerar" ordena por número y renumera 1..N,
+   y el número nuevo es el libre más bajo. Da igual en qué orden se apunten las 70
+   manchas.
 
 ## 1. Se movía a la inversa — ARREGLADO
 
@@ -95,8 +118,14 @@ python ruida.py test                                      # protocolo del panel,
 py hybrid_vision.py calibrate --park 20,20                # ventana con las 2 cámaras
 
 # App de escritorio (en la Pi hace falta xvfb-run: no tiene escritorio real)
-/root/venv/bin/python -m ruidavision.prueba_app           # 20 comprobaciones de GUI y jog
+/root/venv/bin/python -m ruidavision.prueba_app           # ~35 comprobaciones de GUI y jog
 ```
+
+`prueba_app.py` falsea `hv.save_cfg` de **toda** la corrida: antes, una prueba que se
+pasaba guardaba una `H` de mentira en el `calib.json` de la máquina y la siguiente
+reventaba con `Singular matrix`. Ya pasó una vez y se restauró con
+`git checkout -- calib.json`. Si vuelve a salir un `Singular matrix` al arrancar, mira
+`det(H)` de `calib.json` antes de tocar nada más.
 
 W A S D mueven, un paso por pulsación; `v` cicla el paso entre 0.2 / 0.44 / 3.4 mm; Enter
 acepta el punto; `q` sale. Si sale `tecla 0x... sin asignar`, ese es el código crudo de

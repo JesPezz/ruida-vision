@@ -10,6 +10,32 @@ hybrid_vision.py  cámaras, detección de marcas, homografía y flujo Print and 
 calib.json        se crea solo en `calibrate` (cámaras, FOV, homografía H, puntos)
 ```
 
+## Qué cambió en la v1.5
+
+Lo que se arregló en esta versión, con lo medido en esta máquina:
+
+- **El OTA no descargaba nada.** `actualizar.py` pedía la release y luego escribía el
+  fichero con una ruta relativa al directorio del ejecutable, que en Windows bajo
+  `Program Files` no existe: `PermissionError` y descarga a medias. Ahora descarga a
+  `%TEMP%` con ruta absoluta, y **solo** cierra la app si la descarga se ha podido
+  abrir. Sin cambios en la API ni en el repo (siguen sin token, y el repo es público
+  a propósito: contra un repo privado la API devuelve 404 aunque exista la release).
+- **Las cams tardaban 8 s en abrir y iban a 2 fps.** No era hardware: `cap.set(FOURCC)`
+  después de abrir deja el driver en YUY2. Pedir MJPG + resolución + fps en el
+  constructor: 0,9 s y 24,9 fps. Ver "Las cámaras: el MJPG hay que pedirlo al abrir".
+- **Origen y destinos iban a tirones.** `move_to` era todo pulsos de 100 ms
+  (3,4 mm) con una lectura de posición en medio: una rampa de aceleración por cada
+  3,4 mm. Ahora va en jiro continuo a ~5 mm/s y se reserva el paso fino para el
+  último milímetro, con corte por destino.
+- **En Calibrar, la cámara en directo y la foto.** Al entrar en la pestaña se ve la
+  cámara en directo en el visor, y el botón de foto es un icono de cámara. Con una
+  captura ya congelada, el visor ya no se pisa: el botón pasa a guardar.
+- **Numerar las manchas de calibración.** La columna "n" de la tabla de Calibrar es
+  el número de verdad, no el orden de la lista: se puede renumerar a mano
+  ("Cambiar n°"), "Renumerar" ordena por número y renumera 1..N, y `cal_ajusta`
+  empareja cada número con su punto **por ese número**, no por posición. Apuntar 70
+  manchas de un tirón ya no obliga a dejarlas en orden de captura.
+
 ## Dónde corre
 
 En **el PC Windows al que están enchufadas las dos IMX179 por USB** (cenital en la
@@ -274,12 +300,34 @@ Se manda `A5 50 <tecla>` para pulsar y `A5 51 <tecla>` para soltar.
 En la app (`ruidavision/`) un **toque corto** de la tecla o del botón da un solo paso
 fino (el del cuadro "paso"), y **mantener** pulsado mueve en continuo con el nuevo
 `Panel.jog_hold`: manda un solo *keydown*, va leyendo la posición y suelta al acercarse
-a los topes de viaje (10 mm), al soltar la tecla o al pulsar PARAR. El *keyup* va en un
+al destino, al soltar la tecla o al pulsar PARAR. El *keyup* va en un
 `finally`, así que la tecla nunca se queda pegada. Cada tarea de máquina corre en su
 propio hilo, de modo que mantener la tecla **no congela la ventana**.
 
+El corte por destino es el callback `corte(p)` de `jog_hold`, y `_ir_hacia` se lo pasa
+a `move_to`: sin él el lazo solo tendría el tope de viaje, y para llegar a un sitio
+habría que adivinar cuándo frenar. Los topes (`max_ms` a 5 mm/s, `Panel.SAFE`) siguen
+puesto, pero son el backstop, no el plan.
+
 El techo de velocidad del continuo es el del perfil de LightBurn (5 mm/s), no algo que
 se ajuste desde la app: `set_param` por red no cambia nada (ver la sección de abajo).
+
+### Las cámaras: el MJPG hay que pedirlo al abrir
+
+Poner el fourcc con `cap.set()` **después** de abrir no lo negocia: el driver se queda
+en YUY2 y, a 1080p, son 3,7 MB por fotograma. Medido en esta máquina con la cenital:
+
+| cómo se abre | fourcc real | primer fotograma | fps |
+|---|---|---|---|
+| `cap.set(FOURCC)` después | YUY2 | 8,4 s | 2,2 |
+| MJPG + resolución + fps en el constructor | MJPG | 0,03 s (0,9 s hasta abrir) | 24,9 |
+
+Por eso `open_cam` pasa los tres parámetros a `cv2.VideoCapture(...)` y deja el `set`
+para la exposición y el gain, que sí aceptan el cambio en caliente. Si el constructor
+con parámetros no abre, se cae al camino de antes (abrir y luego negociar), y si el
+frame real no es el pedido lo avisa y usa el real: la homografía se escala por
+`frame/cal` (`_px_de_mm`), así que acertar la resolución no es crítico, pero el
+rendimiento sí.
 
 ### La resolución: qué la baja y qué no
 

@@ -70,22 +70,30 @@ def save_cfg(cfg):
 
 def open_cam(cfg, which):
     idx = cfg["%s_cam" % which]
-    cap = None
-    for be in BACKENDS:
-        cap = cv2.VideoCapture(idx, be)
-        if cap.isOpened():
-            break
-        cap.release()
-    if not cap.isOpened():
-        raise IOError("no se abre la camara %s (indice %d). Prueba otro indice "
-                      "o revisa que el driver la vea" % (which, idx))
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     # cada camara tiene su nativa: la cenital es mas grande que la del cabezal,
     # asi que pedirle la de la otra hace que el driver avise cada vez
     res = cfg.get("%s_res" % which) or cfg["res"]
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, res[0])
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res[1])
-    cap.set(cv2.CAP_PROP_FPS, cfg["fps"])
+    # El MJPG hay que PEDIRLO al abrir. Ponerlo despues con cap.set() no lo
+    # negocia: el driver se queda en YUY2, que son 3,7 MB por fotograma a 1080p,
+    # y la camara baja a 2 fps. Medido en esta maquina: abriendo con los
+    # parametros, MJPG y 25 fps, y el primer fotograma a los 1,7 s; poniendo el
+    # fourcc despues, YUY2, 2,2 fps y 8,4 s. El `set` de aqui abajo se queda
+    # para la exposicion y el gain, que si aceptanirse en caliente.
+    params = [cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"),
+              cv2.CAP_PROP_FRAME_WIDTH, res[0],
+              cv2.CAP_PROP_FRAME_HEIGHT, res[1],
+              cv2.CAP_PROP_FPS, cfg["fps"]]
+    cap = cv2.VideoCapture(idx, BACKENDS[0], params)
+    if not cap.isOpened():
+        cap.release()                      # ese camino no sirve: el de antes
+        for be in BACKENDS:
+            cap = cv2.VideoCapture(idx, be)
+            if cap.isOpened():
+                break
+            cap.release()
+    if not cap.isOpened():
+        raise IOError("no se abre la camara %s (indice %d). Prueba otro indice "
+                      "o revisa que el driver la vea" % (which, idx))
     if cfg["exposure"] is not None:
         cap.set(cv2.CAP_PROP_EXPOSURE, cfg["exposure"])
     if cfg["gain"] is not None:
