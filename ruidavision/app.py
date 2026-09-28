@@ -37,13 +37,21 @@ from ruidavision import VERSION
 from ruidavision import actualizar
 
 # Donde estan los datos. Instalada, la app vive en Archivos de programa, que
-# es de solo lectura para un usuario normal: todo lo que la app ESCRIBE
-# (calibrado, registro, coordenadas, fotos) va a los datos del usuario, que es
-# donde Windows manda. Sin installing, todo junto a los .py.
+# es de solo lectura para un usuario normal. Si se ejecuta desde el codigo y ya
+# existe el calibrado de una instalacion, se reutiliza para no mover con otra H.
 CONGELADO = getattr(sys, "frozen", False)
 BASE = os.path.dirname(sys.executable) if CONGELADO else hv.HERE
-DATOS = os.path.join(os.environ.get("LOCALAPPDATA", BASE), "Ruida Vision") \
-    if CONGELADO else BASE
+
+
+def _directorio_datos(congelado, base, localappdata):
+    usuario = os.path.join(localappdata or base, "Ruida Vision")
+    if congelado or (localappdata and
+                     os.path.isfile(os.path.join(usuario, "calib.json"))):
+        return usuario
+    return base
+
+
+DATOS = _directorio_datos(CONGELADO, BASE, os.environ.get("LOCALAPPDATA"))
 
 
 def _datos():
@@ -185,6 +193,13 @@ def _encuadre(W, H, w, h):
     return e, (W - w * e) / 2.0, (H - h * e) / 2.0
 
 
+def _posicion_valida(p):
+    if p is None:
+        return False
+    x0, x1, y0, y1 = ruida.Panel.SAFE
+    return x0 - 1 <= p[0] <= x1 + 1 and y0 - 1 <= p[1] <= y1 + 1
+
+
 class Foto(tk.Canvas):
     """Un fotograma congelado, con clic que devuelve el pixel REAL.
 
@@ -285,6 +300,7 @@ class App(tk.Tk):
         self.cfg = hv.load_cfg()
         self.lineas = queue.Queue()      # texto del registro
         self.trabajos = queue.Queue()    # cosas que se ejecutan en la UI
+        self._log_candado = threading.Lock()
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="maquina")
         self.maq = Maquina()
         self.video = None
@@ -377,8 +393,14 @@ class App(tk.Tk):
 
     # -------------------------------------------------------------- fontaneria
     def log(self, txt):
-        """A hilo seguro: el registro es una cola y lo vacia la UI."""
-        self.lineas.put(str(txt))
+        """Guarda el registro en disco y encola su copia para la interfaz."""
+        linea = str(txt)
+        with self._log_candado:
+            os.makedirs(DATOS, exist_ok=True)
+            with open(LOGF, "a", encoding="utf-8") as f:
+                f.write(linea + "\n")
+                f.flush()
+        self.lineas.put(linea)
 
     def call(self, fn, *a):
         """Ejecutar `fn` en el hilo de la UI. Lo unico que se puede tocar
@@ -415,15 +437,19 @@ class App(tk.Tk):
         boton que parece colgado, que es el sintoma que se reporto.
         """
         def trabajo():
-            try:
-                with contextlib.redirect_stdout(_Tee(self.log)):
-                    return fn(*a, **kw)
-            except Exception as e:
-                self.log("ERROR: %s" % e)
-                return None
+            with contextlib.redirect_stdout(_Tee(self.log)):
+                return fn(*a, **kw)
         f = self.pool.submit(trabajo)
         if al_terminar:
-            f.add_done_callback(lambda fu: self.call(al_terminar, fu))
+            def terminado(fu):
+                if fu.exception() is not None:
+                    self.log("ERROR: %s" % fu.exception())
+                self.call(al_terminar, fu)
+            f.add_done_callback(terminado)
+        else:
+            f.add_done_callback(
+                lambda fu: self.log("ERROR: %s" % fu.exception())
+                if fu.exception() is not None else None)
         return f
 
     # ------------------------------------------------------------ hoja "vivo"
@@ -572,6 +598,7 @@ class App(tk.Tk):
         if pan is None:
             self.log("sin panel: no se puede mover")
             return None
+        pan.resume()
         return pan.jog_hold(d, ev)
 
     def _paso(self, d):
@@ -580,6 +607,7 @@ class App(tk.Tk):
         if pan is None:
             self.log("sin panel: no se puede mover")
             return None
+        pan.resume()
         return pan.hold(d, hv.ms_de_paso(self.paso_mm))
 
     def _suelta(self, d=None):
@@ -653,8 +681,27 @@ class App(tk.Tk):
         self._tarea(self.maq.get().park)
 
     def stop(self):
-        self._suelta()                   # corta tambien el jog continuo
-        self._tarea(self.maq.get().pan.stop)
+        for attr in ("_jog_t", "_jog_p"):
+            after_id = getattr(self, attr)
+            if after_id is not None:
+                self.after_cancel(after_id)
+                setattr(self, attr, None)
+        if self._jog_ev is not None:
+            self._jog_ev.set()
+            self._jog_ev = None
+        self._jog_d = None
+        try:
+            pan = self.maq.get().pan
+            if pan is None:
+                self.log("PARAR: sin panel conectado")
+                return
+            pan.stop()
+            self.log("PARAR: movimiento detenido; teclas del panel liberadas")
+        except Exception as e:
+            self.log("ERROR al parar el movimiento: %s" % e)
+            messagebox.showerror("Parar movimiento",
+                                 "No se pudo enviar PARAR:\n\n%s" % e,
+                                 parent=self)
 
     def ir_a(self, x, y):
         self._tarea(self.maq.get().goto, x, y)
@@ -1159,15 +1206,31 @@ class App(tk.Tk):
             self.detectar()
             return
         mm = self.marcas2[i]
-        self.i_marca = i + 1
-        self._boton_mover()
+        self.btn_mover.configure(text="Moviendo %d..." % (i + 1), state="disabled")
         self.lbl_marcas.configure(text="moviendo al punto %d..." % (i + 1),
                                   style="Chico.TLabel")
         self.log("marcando punto %d: %.3f, %.3f mm" % (i + 1, mm[0], mm[1]))
         self._suelta()                   # un Mover con el jog vivo seria raro
         # _tarea solo pasa el future a al_terminar, asi que el position va dentro
         self._tarea(self._marca_a, mm, i,
-                    al_terminar=lambda fu: self.call(self._fin_punto, i, fu.result()))
+                    al_terminar=lambda fu: self._fin_movimiento(i, fu))
+
+    def _fin_movimiento(self, i, fu):
+        try:
+            pos = fu.result()
+        except Exception as e:
+            detalle = "ERROR al mover al punto %d: %s" % (i + 1, e)
+            self.log(detalle)
+            self.lbl_marcas.configure(text=detalle, style="Mal.TLabel")
+            self.lbl_punto.configure(text="PUNTO %d: MOVIMIENTO CANCELADO"
+                                      % (i + 1), foreground="#8b1a1a")
+            self._boton_mover()
+            messagebox.showerror(
+                "Movimiento cancelado",
+                "%s\n\nNo vuelvas a pulsar Mover hasta revisar el registro."
+                % detalle, parent=self)
+            return
+        self._fin_punto(i, pos)
 
     def _marca_a(self, mm, i):
         """En el hilo de trabajo: el cabezal al punto, y la posicion que de
@@ -1176,17 +1239,30 @@ class App(tk.Tk):
         if pan is None or pan.pan is None:
             self.log("sin panel: no se puede mover")
             return None
-        pan.move_to(mm[0], mm[1])
-        return pan.pos()
+        pos = pan.goto(mm[0], mm[1])
+        if not _posicion_valida(pos):
+            raise RuntimeError("el panel no devolvio una posicion valida al mover")
+        error = float(np.hypot(pos[0] - mm[0], pos[1] - mm[1]))
+        if error > 0.5:
+            raise RuntimeError(
+                "no se alcanzo el punto %.3f, %.3f; el cabezal quedo en "
+                "%.3f, %.3f (error %.3f mm)"
+                % (mm[0], mm[1], pos[0], pos[1], error))
+        self.log("punto alcanzado: %.3f, %.3f mm" % (pos[0], pos[1]))
+        return pos
 
     def _fin_punto(self, i, pos):
         """Ya esta el cabezal en el punto: se enseña la posicion para copiarla
         a LightBurn con un dedo, no con el portapapeles."""
         ox, oy = self.cfg["cam_offset_mm"]
-        if pos is None or not self._ok(pos):
-            self.lbl_punto.configure(text="PUNTO %d: sin posicion (mira el registro)"
-                                     % (i + 1))
+        if not _posicion_valida(pos):
+            self.lbl_punto.configure(
+                text="PUNTO %d: movimiento no confirmado; mira el registro"
+                     % (i + 1), foreground="#8b1a1a")
+            self._boton_mover()
             return
+        self.i_marca = i + 1
+        self._boton_mover()
         x, y = (pos[0] + ox, pos[1] + oy) if i == 0 else (pos[0], pos[1])
         self.lbl_punto.configure(text="PUNTO %d:    X = %.3f     Y = %.3f mm"
                                   % (i + 1, x, y), foreground="#0a7d33")

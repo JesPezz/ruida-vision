@@ -58,6 +58,26 @@ class VideoFalso:
         return self.n, self.top_im, self.head_im
 
 
+class MaquinaFalsa:
+    """Sustituto de app.Maquina para que los callbacks no abran el puerto real."""
+
+    def __init__(self):
+        self.ip = None
+        self.mq = None
+        self.simulada = SimpleNamespace(
+            pan=object(), park=lambda: None, goto=lambda x, y: None,
+            pos=lambda timeout=1.0: (250.0, 180.0))
+
+    def get(self):
+        return self.simulada
+
+    def cerrar(self):
+        if self.mq:
+            self.mq.close()
+            self.mq = None
+        self.ip = None
+
+
 def hv_bed_temp(app):
     """bed.png y coords.txt falsos, en un temporal, y las rutas de la app
     apuntando a ellos. Devuelve las dos rutas para borrarlas."""
@@ -79,6 +99,9 @@ def hv_bed_temp(app):
 def main():
     fallos = []
     hechas = []
+    log_original = A.LOGF
+    log_temporal = tempfile.TemporaryDirectory()
+    A.LOGF = os.path.join(log_temporal.name, "app.log")
 
     def chk(desc, cond):
         hechas.append(desc)
@@ -87,6 +110,22 @@ def main():
         # abre su ventana, y un fallo parece no existir.
         print(("  OK  " if cond else "FALLO ") + desc, flush=True)
 
+    with tempfile.TemporaryDirectory() as temporal:
+        base = os.path.join(temporal, "proyecto")
+        local = os.path.join(temporal, "Local")
+        datos_usuario = os.path.join(local, "Ruida Vision")
+        os.makedirs(base)
+        os.makedirs(datos_usuario)
+        with open(os.path.join(datos_usuario, "calib.json"), "w",
+                  encoding="utf-8") as f:
+            f.write("{}")
+        chk("el modo codigo reutiliza el calibrado de la instalacion",
+            A._directorio_datos(False, base, local) == datos_usuario)
+        chk("sin calibrado instalado el modo codigo usa los datos del proyecto",
+            A._directorio_datos(False, base, None) == base)
+        chk("el ejecutable instalado mantiene sus datos de usuario",
+            A._directorio_datos(True, base, local) == datos_usuario)
+
     A.Video = VideoFalso
     # La app mira sola si hay version nueva a los 800 ms, sin boton. Falsear
     # `comprobar` ANTES de que ese `after` dispare: si no, la prueba sale a
@@ -94,6 +133,7 @@ def main():
     # la prueba de que el `after` estaba bien enganchado.
     A.actualizar.comprobar = lambda *a, **k: (False, "sin novedades", None)
     app = A.App()
+    app.maq = MaquinaFalsa()
     # save_cfg falso para TODO el recorrido: si una sola prueba se pasa y
     # guarda, escribe una H de mentira en el calib.json de la maquina y la
     # prueba siguiente revienta con Singular matrix. Aki solo se acumula.
@@ -445,10 +485,21 @@ def main():
     fake = [(1.5, 2.5), (61.0, 41.0)]
     # H identidad: px == mm, y asi las cifras del test son las que se ven.
     app.cfg["H"] = np.eye(3, dtype=np.float32).tolist()
-    found = [(10, 10, 900), (20, 20, 800), (600, 900, 700), (30, 30, 600)]
+    found = [(1.5, 2.5, 900), (61.0, 41.0, 800),
+             (600, 900, 700), (30, 30, 600)]
     app._tarea = lambda fn, *a, **kw: fn(*a)
-    app._ok = lambda p: True
-    app._marca_a = lambda mm, i: fake[i]                 # sin Ruida de verdad
+    app._ok = True
+    app.cfg["cam_offset_mm"] = [0.0, 0.0]
+    movimientos = []
+    def goto_falso(x, y):
+        movimientos.append((x, y))
+        return fake[len(movimientos) - 1]
+
+    maquina_falsa = SimpleNamespace(
+        pan=object(),
+        goto=goto_falso,
+        pos=lambda: fake[len(movimientos) - 1])
+    app.maq = SimpleNamespace(get=lambda: maquina_falsa)
     marcas, aviso = app._elige_marcas(found)
     chk("solo se quedan las manchas dentro del area de trabajo", len(marcas) == 2)
     chk("las de fuera se dicen, no se esconden",
@@ -459,6 +510,8 @@ def main():
         "Mover 1" in app.btn_mover.cget("text"))
     app.mover_marca()
     app._fin_punto(0, fake[0])
+    chk("Mover envía el punto 1 a Machine.goto",
+        movimientos == [marcas[0]])
     chk("tras mover a 1 el boton ofrece el punto 2",
         "Mover 2" in app.btn_mover.cget("text"))
     chk("la posicion del punto 1 se lee en pantalla",
@@ -466,6 +519,8 @@ def main():
         and "1.500" in app.lbl_punto.cget("text"))
     app.mover_marca()
     app._fin_punto(1, fake[1])
+    chk("Mover envía el punto 2 a Machine.goto",
+        movimientos == marcas)
     chk("la posicion del punto 2 se lee en pantalla",
         "PUNTO 2" in app.lbl_punto.cget("text")
         and "61.000" in app.lbl_punto.cget("text"))
@@ -474,6 +529,25 @@ def main():
     app._boton_mover()
     chk("acabados los dos puntos no hay mas que mover",
         "2" not in app.btn_mover.cget("text"))
+    app.i_marca = 0
+    app._boton_mover()
+    errores_ui = []
+    showerror_real = A.messagebox.showerror
+    A.messagebox.showerror = lambda *a, **k: errores_ui.append(a)
+    del app._tarea
+    app._tarea(
+        lambda: (_ for _ in ()).throw(RuntimeError("fallo simulado de jog")),
+        al_terminar=lambda fu: app.call(app._fin_movimiento, 0, fu))
+    bombea(app, 0.3)
+    A.messagebox.showerror = showerror_real
+    registro = open(A.LOGF, encoding="utf-8").read()
+    chk("si falla el movimiento Mover no salta al punto 2",
+        app.i_marca == 0 and "Mover 1" in app.btn_mover.cget("text"))
+    chk("el fallo del movimiento se muestra en la pestaña y en un aviso",
+        "fallo simulado de jog" in app.lbl_marcas.cget("text")
+        and errores_ui and "fallo simulado de jog" in errores_ui[0][1])
+    chk("el registro del movimiento se guarda en app.log",
+        "fallo simulado de jog" in registro)
     app.marcas2, app.i_marca = [], 0
     app._boton_mover()
 
@@ -516,6 +590,9 @@ def main():
         def jog_hold(self, k, ev):
             self.jogs.append((k, ev))
 
+        def resume(self):
+            pass
+
         def stop(self):
             self.stops += 1
 
@@ -544,8 +621,12 @@ def main():
     bombea(app, 0.3)
     chk("al soltar se corta el continuo", ev is not None and ev.is_set())
 
-    app.stop()                           # el boton PARAR tambien corta el jog
-    chk("PARAR detiene el panel", pan.stops == 1)
+    ev_stop = threading.Event()
+    app._jog_ev = ev_stop
+    app.stop()                           # liberacion directa, sin esperar al pool
+    chk("PARAR detiene el panel inmediatamente", pan.stops == 1)
+    chk("PARAR tambien cancela el evento del jog continuo",
+        ev_stop.is_set() and app._jog_ev is None)
 
     app.salir()
     # El hilo del pool sigue vivo un instante (parkado) despues del shutdown:
@@ -553,6 +634,8 @@ def main():
     # es lo que se ve al terminar esta prueba sin que se quede colgada.
     chk("el pool de trabajo queda cerrado", app.pool._shutdown is True)
     A.hv.save_cfg = save_real          # ya nadie puede escribir el calib.json
+    A.LOGF = log_original
+    log_temporal.cleanup()
     # el total tambien: si el registro se pierde a medias, el numero dice si las
     # comprobaciones llegaron a correr todas.
     print("app: %d fallos de %d comprobaciones %s"

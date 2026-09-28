@@ -177,6 +177,7 @@ class Panel:
         self._buf = b""
         self._beat = 0.0
         self._pending = None
+        self._stop_event = threading.Event()
         self.s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.s.bind(("0.0.0.0", src))
         self.s.connect((ip, PORT_PANEL))
@@ -189,6 +190,15 @@ class Panel:
         # despues ignora las nuevas hasta que llegue su keyup.
         for k in self.JOG.values():
             self.s.sendall(bytes([0xA5, 0x51, k]))
+
+    def stop(self):
+        """Cancela el movimiento activo y suelta las teclas sin esperar al pool."""
+        self._stop_event.set()
+        self.release()
+
+    def resume(self):
+        """Permite una nueva orden despues de un stop explicito."""
+        self._stop_event.clear()
 
     def _drain(self):
         """Tira lo que hubiera pendiente en el socket.
@@ -286,6 +296,10 @@ class Panel:
     # de equivocarse, porque nunca sobrepasa lo previsto. Y el tope de 100 ms
     # impide que un pulso se vaya al tope de recorrido.
     JOG_MAX_MS = 100.0
+    MOVE_COARSE_MM = 8.0
+    MOVE_BRAKE_MM = 4.0
+    MOVE_MAX_SEGMENT_MS = 400.0
+    MOVE_SAFE_MARGIN_MM = 15.0
     # Caja de viaje segura. Medida en esta maquina: el tope del recorrido esta
     # en 500.049 x 400.046. ponytail:Measure con el cabezal en las cuatro
     # esquinas y ajusta; si el soft limit real es menor, baja estos numeros.
@@ -302,6 +316,28 @@ class Panel:
         self.s.sendall(bytes([0xA5, 0x50, self.JOG[key]]))
         time.sleep(ms / 1000.0)
         self.s.sendall(bytes([0xA5, 0x51, self.JOG[key]]))
+
+    def hold_vector(self, x_key, x_ms, y_key, y_ms):
+        """Ejecuta un tramo XY temporizado, liberando cada eje al vencer."""
+        if self._stop_event.is_set():
+            raise InterruptedError("movimiento detenido por el usuario")
+        active = []
+        started = time.monotonic()
+        try:
+            for key, duration in ((x_key, x_ms), (y_key, y_ms)):
+                if key is None or duration <= 0:
+                    continue
+                code = self.JOG[key]
+                self.s.sendall(bytes([0xA5, 0x50, code]))
+                active.append((key, code, started + duration / 1000.0))
+            for key, code, deadline in sorted(active, key=lambda item: item[2]):
+                if self._stop_event.wait(max(0.0, deadline - time.monotonic())):
+                    raise InterruptedError("movimiento detenido por el usuario")
+                self.s.sendall(bytes([0xA5, 0x51, code]))
+                active = [item for item in active if item[1] != code]
+        finally:
+            for _, code, _ in active:
+                self.s.sendall(bytes([0xA5, 0x51, code]))
 
     def jog_hold(self, key, parar, margen=10.0, poll=0.08, max_ms=120000.0,
                  verbose=True, corte=None):
@@ -329,7 +365,7 @@ class Panel:
         t0, malas, p = time.time(), 0, None
         self.s.sendall(bytes([0xA5, 0x50, k]))
         try:
-            while not parar.is_set():
+            while not parar.is_set() and not self._stop_event.is_set():
                 if (time.time() - t0) * 1000.0 >= max_ms:
                     if verbose:
                         print("[jog] %s cortado por tiempo" % key)
@@ -370,85 +406,201 @@ class Panel:
             prev = p
         return prev
 
-    def _ir_hacia(self, key, destino, margen=3.0, margen_tope=10.0, poll=0.08):
-        """Jiro continuo en `key` hasta quedarse a `margen` de `destino`.
+    def _ir_hacia(self, key, destino, margen=4.0, margen_tope=10.0, poll=0.04,
+                  desde=None, max_ms=120000.0):
+        """Jog continuo en `key` hasta la zona de frenado del destino.
 
-        Devuelve la ultima posicion creible, o None si no se pudo. El margen
-        para antes es el de la zona muerta del pulsado corto (0.2 mm) mas lo que
-        se arrastra el informe de posicion; el corte por tope de viaje lo hace
-        `jog_hold`, asi que un destino mal escrito no manda el cabezal contra
-        el tope fisico."""
-        parar = threading.Event()
-        while True:
-            p = self.jog_hold(
-                key, parar, margen=margen_tope, poll=poll, verbose=False,
-                corte=lambda q: abs(destino - (q[0] if key[1] == "X" else q[1]))
-                <= margen)
-            if p is None or not self._ok(p):
-                return None
-            d = destino - (p[0] if key[1] == "X" else p[1])
-            if abs(d) <= margen:
-                return p
-            if (d > 0) != (key[0] == "+"):
-                return p                 # nos pasamos: que lo ajuste el lazo fino
-            parar.set()                   # aun de largo: otro tramo, mismo sentido
+        El corte es direccional: si una lectura llega tarde y ya cruzo el
+        destino, tambien suelta la tecla. Comparar solo la distancia absoluta
+        dejaba el jog activo tras un sobrepaso y podia llevarlo hasta el tope.
+        """
+        axis = 0 if key[1] == "X" else 1
+        if desde is None:
+            desde = self.position(2.0)
+        if not self._ok(desde):
+            return None
+        inicio = desde[axis]
+        sentido = 1 if key[0] == "+" else -1
+        if (destino - inicio) * sentido <= 0:
+            raise ValueError("la direccion %s no lleva al destino %.3f"
+                             % (key, destino))
+        if abs(destino - inicio) <= margen:
+            return desde
+        sentido_incorrecto = threading.Event()
 
-    def move_to(self, x, y, tol=0.1, tries=80, budget=60.0, verbose=True):
+        def cortar(p):
+            actual = p[axis]
+            if (actual - inicio) * sentido < -0.5:
+                sentido_incorrecto.set()
+                return True
+            return (destino - actual) * sentido <= margen
+
+        if self.verbose:
+            print("[jog] %s: %.3f -> %.3f mm (destino %.3f)"
+                  % (key, inicio, destino, destino))
+        p = self.jog_hold(
+            key, threading.Event(), margen=margen_tope, poll=poll,
+            max_ms=max_ms, verbose=False, corte=cortar)
+        if self.verbose:
+            print("[jog] %s: lectura final %s" % (key, p))
+        if sentido_incorrecto.is_set():
+            raise RuntimeError(
+                "el jog %s movio el eje en sentido contrario; se cancelo antes "
+                "del limite (inicio %.3f, lectura %s)"
+                % (key, inicio, p))
+        return p if self._ok(p) else None
+
+    def move_to(self, x, y, tol=0.1, tries=250, budget=120.0, verbose=True):
         """Lleva el cabezal a (x, y) mm.
 
-        En dos tramos: jiro continuo hasta el vecindario del destino y ajuste
-        fino con pulsos cortos. Antes era todo pulsos de 100 ms (3,4 mm) con
-        una lectura de posicion en medio, y por eso el Origen iba a tirones y
-        tardaba: pagar una rampa de aceleracion por cada 3,4 mm. Con el jiro se
-        va de una vez a ~5 mm/s y el fino se queda para el ultimo milimetro.
-        tol=0.1 mm es lo que converge de forma fiable: el paso minimo es 0.2 mm,
-        asi que con 0.05 el lazo no resuelve el ultimo 0.2 y se queda paseando
-        hasta agotar el presupuesto (medido: 2 de 4 objetivos a 0.05 en 41 s;
-        los 4 a 0.1 en 6-15 s).
-        Con topes en las tres cosas: caja de viaje, numero
-        de intentos y segundos. Un lazo sin plazo acaba pilotando al cabezal
-        contra un tope de recorrido, que es como se perdio la referencia
-        antes: devuelve donde esta, no donde se pedia."""
+        Los tramos largos coordinan ambos ejes en una diagonal temporizada.
+        Cada segmento tiene una duracion maxima, tras la cual se relee la
+        posicion; la duracion por eje conserva la proporcion hacia el destino.
+        Los pulsos se reservan para el ajuste final. Se evita dejar un jog
+        continuo esperando una lectura de posicion que puede llegar tarde.
+        """
         x0, x1, y0, y1 = self.SAFE
         if not (x0 <= x <= x1 and y0 <= y <= y1):
             raise ValueError("destino %.3f, %.3f fuera de la caja %s"
                              % (x, y, self.SAFE))
+        self.resume()
         t0 = time.time()
-        for i in range(tries):
+        p = self.position(2.0)
+        if not self._ok(p):
+            raise RuntimeError("sin lectura valida de la posicion inicial")
+
+        rates = [self.JOG_RATE, self.JOG_RATE]
+        for _ in range(tries):
+            if self._stop_event.is_set():
+                raise InterruptedError("movimiento detenido por el usuario")
             if time.time() - t0 > budget:
                 break
-            p = self.settled() if i else self.position(2.0)
+            dx, dy = x - p[0], y - p[1]
+            if max(abs(dx), abs(dy)) <= self.MOVE_COARSE_MM:
+                break
+            deltas = [dx, dy]
+            active_axes = [abs(delta) > self.MOVE_COARSE_MM
+                           for delta in deltas]
+            bounds = (x1, y1)
+            safe_dists = []
+            for i, delta in enumerate(deltas):
+                if delta > 0:
+                    safe_dists.append(max(
+                        0.0, bounds[i] - p[i] - self.MOVE_SAFE_MARGIN_MM))
+                else:
+                    safe_dists.append(max(
+                        0.0, p[i] - (x0, y0)[i] - self.MOVE_SAFE_MARGIN_MM))
+            progress = [
+                min(1.0, max(0.0, 1.0 - self.MOVE_BRAKE_MM / abs(deltas[i])),
+                    safe_dists[i] / abs(deltas[i]))
+                for i in range(2) if active_axes[i]
+            ]
+            fraction = min(progress, default=0.0)
+            raw_ms = [
+                abs(deltas[i]) * fraction / rates[i] if active_axes[i] else 0.0
+                for i in range(2)
+            ]
+            longest = max(raw_ms)
+            if longest <= 0:
+                break
+            scale = min(1.0, self.MOVE_MAX_SEGMENT_MS / longest)
+            durations = [duration * scale for duration in raw_ms]
+            # Mantener una direccion diagonal recta requiere que ambas teclas
+            # empiecen juntas y cada una se suelte cuando complete su proporcion.
+            keys = [
+                ("+" if dx > 0 else "-") + "X" if durations[0] > 0 else None,
+                ("+" if dy > 0 else "-") + "Y" if durations[1] > 0 else None,
+            ]
+            if verbose:
+                print("[jog] diagonal: %.3f, %.3f -> %.3f, %.3f; "
+                      "tramo %.0f/%.0f ms"
+                      % (p[0], p[1], x, y, durations[0], durations[1]))
+            self.hold_vector(keys[0], durations[0], keys[1], durations[1])
+            if self._stop_event.is_set():
+                raise InterruptedError("movimiento detenido por el usuario")
+            actual = self.position(2.0)
+            if not self._ok(actual):
+                raise RuntimeError("sin lectura valida despues del tramo diagonal")
+            moved = [actual[0] - p[0], actual[1] - p[1]]
+            requested = [dx, dy]
+            for axis, delta, direction in zip(("X", "Y"), moved, requested):
+                if abs(direction) > self.MOVE_COARSE_MM and delta * direction < -0.05:
+                    raise RuntimeError(
+                        "el tramo diagonal movio %s en sentido contrario "
+                        "(%.3f mm); movimiento cancelado" % (axis, delta))
+            for i, duration in enumerate(durations):
+                if duration > 0:
+                    measured = abs(moved[i]) / duration
+                    if measured > 0.001:
+                        rates[i] = min(0.15, max(0.005, measured))
+            if verbose:
+                print("[jog] lectura tras diagonal: %.3f, %.3f "
+                      "(cambio %+.3f, %+.3f)"
+                      % (actual[0], actual[1], moved[0], moved[1]))
+            p = actual
+
+        for i in range(tries):
+            if self._stop_event.is_set():
+                raise InterruptedError("movimiento detenido por el usuario")
+            if time.time() - t0 > budget:
+                break
             if not self._ok(p):
                 if verbose:
                     print("[jog] lectura no creible, reintento")
+                p = self.position(2.0)
                 continue
             dx, dy = x - p[0], y - p[1]
-            if math.hypot(dx, dy) <= tol:
+            if max(abs(dx), abs(dy)) <= tol:
                 return p
-            grueso = abs(dx) > 10 or abs(dy) > 10
-            for axis, d in (("X", dx), ("Y", dy)):
+            if verbose:
+                print("[jog] destino %.3f, %.3f; posicion %.3f, %.3f; "
+                      "diferencia %.3f, %.3f"
+                      % (x, y, p[0], p[1], dx, dy))
+            for axis, indice, destino in (("X", 0, x), ("Y", 1, y)):
+                if self._stop_event.is_set():
+                    raise InterruptedError("movimiento detenido por el usuario")
+                d = destino - p[indice]
                 if abs(d) <= tol:
-                    continue
-                if grueso and abs(d) > 3:
-                    p = self._ir_hacia(("+" if d > 0 else "-") + axis,
-                                       x if axis == "X" else y)
-                    if p is None:
-                        break
                     continue
                 ms = (abs(d) - self.JOG_STEP) / self.JOG_RATE
                 ms = min(self.JOG_MAX_MS, max(1.0, ms))
                 # no acercarse al tope de viaje desde fuera
-                cur = p[0] if axis == "X" else p[1]
+                cur = p[indice]
+                if verbose:
+                    print("[jog] pulso %s desde %.3f por %.1f ms"
+                          % (axis, cur, ms))
                 room = (x1 - cur) if d > 0 else (cur - x0)
-                if room < abs(d) + 2:
-                    ms = min(ms, max(1.0, (max(0.0, room - 1.5) - self.JOG_STEP)
-                                     / self.JOG_RATE))
+                max_safe_ms = (room - 1.5 - self.JOG_STEP) / self.JOG_RATE
+                if max_safe_ms < 1.0:
+                    raise RuntimeError(
+                        "no hay margen seguro para el pulso de %s; "
+                        "posicion %.3f, limite %.3f" % (axis, cur,
+                        x1 if axis == "X" and d > 0 else
+                        x0 if axis == "X" else y1 if d > 0 else y0))
+                ms = min(ms, max_safe_ms)
                 self.hold(("+" if d > 0 else "-") + axis, ms)
+                if self._stop_event.is_set():
+                    raise InterruptedError("movimiento detenido por el usuario")
+                actual = self.position(2.0)
+                if not self._ok(actual):
+                    raise RuntimeError(
+                        "sin lectura valida despues del pulso %s; movimiento "
+                        "cancelado" % axis)
+                desplazamiento = actual[indice] - cur
+                if desplazamiento * (1 if d > 0 else -1) < -0.05:
+                    raise RuntimeError(
+                        "el pulso de %s movio el eje en sentido contrario "
+                        "(%.3f mm); movimiento cancelado"
+                        % (axis, desplazamiento))
+                p = actual
+                if verbose:
+                    print("[jog] pulso %s: lectura %.3f (cambio %+.3f mm)"
+                          % (axis, actual[indice], desplazamiento))
             if verbose:
                 print("[jog] %7.3f, %7.3f -> faltan %.3f, %.3f"
                       % (p[0], p[1], dx, dy))
         p = self.settled()
-        if p and verbose and math.hypot(x - p[0], y - p[1]) > tol:
+        if p and verbose and max(abs(x - p[0]), abs(y - p[1])) > tol:
             print("[jog] AVISO: se queda en %.3f, %.3f (pedidos %.3f, %.3f)"
                   % (p[0], p[1], x, y))
         return p
@@ -457,7 +609,7 @@ class Panel:
         self.s.close()
 
 
-def move_and_wait(pan, x, y, tol=0.1, timeout=20.0):
+def move_and_wait(pan, x, y, tol=0.1, timeout=120.0):
     """Lleva el cabezal a (x, y) mm y devuelve la posicion real.
 
     El movimiento va por el teclado del 50207, no por move_abs del 50200: en
@@ -533,6 +685,7 @@ def selftest():
             pass
     pn = Panel.__new__(Panel)
     pn.verbose, pn._buf, pn._beat, pn._pending = False, b"", 0.0, None
+    pn._stop_event = threading.Event()
     pn.s = FakeSock()
     want = (1000.045, 600.047)
     assert pn.handshake(timeout=0.1) is True
@@ -567,8 +720,13 @@ def selftest():
     pn.s.sent[:] = []
     pn.jog_hold("+Y", Nadie(), poll=0.01, verbose=False)
     assert pn.s.sent[-1].hex() == "a55104", "ni corto ni solto en el tope"
-    # El tramo grueso de move_to: un solo keydown, corte por destino y no por
-    # tope de viaje (si no, el Origen se iba al final de la cama).
+    pn.s.sent[:] = []
+    pn.hold_vector("+X", 2.0, "-Y", 4.0)
+    assert pn.s.sent[:2] == [bytes.fromhex("a55001"), bytes.fromhex("a55003")]
+    assert pn.s.sent.count(bytes.fromhex("a55101")) == 1
+    assert pn.s.sent.count(bytes.fromhex("a55103")) == 1
+    assert pn.s.sent[-1] == bytes.fromhex("a55103"), pn.s.sent
+    # El jog manual corta al alcanzar destino y no solo por el tope.
     pos = [200.0]
 
     def avanza(t=0):
@@ -586,6 +744,132 @@ def selftest():
     pos[0] = 190.0
     p = pn._ir_hacia("+X", 205.0, margen=3.0, poll=0.001)
     assert p is not None and abs(p[0] - 205.0) <= 3.0, p
+    # Una lectura tardia que cruza el destino tambien debe cortar el jog.
+    pn.position = lambda t=0: (190.0, 200.0)
+    posiciones_tardias = iter((200.0, 210.0, 300.0))
+
+    def jog_con_lectura_tardia(key, parar, corte, **kw):
+        for x_leido in posiciones_tardias:
+            actual = (x_leido, 200.0)
+            if corte(actual):
+                return actual
+        raise AssertionError("el jog no corto al cruzar el destino")
+
+    pn.jog_hold = jog_con_lectura_tardia
+    p = pn._ir_hacia("+X", 205.0, margen=3.0, desde=(190.0, 200.0))
+    assert p == (210.0, 200.0), p
+    # Los tramos largos avanzan en diagonal con tiempos proporcionales por eje,
+    # releen posicion entre segmentos y reservan pulsos para el ajuste final.
+    for inicio, destino in (((149.139, 0.034), (333.711, 123.838)),
+                            ((500.0, 400.0), (333.711, 123.838))):
+        sim_pos = list(inicio)
+        pulsos = []
+        diagonales = []
+
+        def pos_simulada(timeout=0):
+            return tuple(sim_pos)
+
+        def settled_no_deberia_llamarse(*a, **kw):
+            raise AssertionError("move_to repitio lecturas settled innecesarias")
+
+        def pulso_simulado(key, ms):
+            axis = 0 if key[1] == "X" else 1
+            sign = 1 if key[0] == "+" else -1
+            paso = Panel.JOG_STEP + ms * Panel.JOG_RATE
+            sim_pos[axis] += sign * paso
+            pulsos.append((key, ms, tuple(sim_pos)))
+
+        def vector_simulado(x_key, x_ms, y_key, y_ms):
+            diagonales.append((x_key, x_ms, y_key, y_ms))
+            for axis, key, ms in ((0, x_key, x_ms), (1, y_key, y_ms)):
+                if key and ms > 0:
+                    sign = 1 if key[0] == "+" else -1
+                    sim_pos[axis] += sign * ms * Panel.JOG_RATE
+            assert 0.0 <= sim_pos[0] <= 500.0
+            assert 0.0 <= sim_pos[1] <= 400.0
+
+        pn.position = pos_simulada
+        pn.settled = settled_no_deberia_llamarse
+        pn.hold = pulso_simulado
+        pn.hold_vector = vector_simulado
+        alcanzada = pn.move_to(*destino, verbose=False)
+        error = math.hypot(alcanzada[0] - destino[0],
+                           alcanzada[1] - destino[1])
+        assert error <= 0.5, (inicio, destino, alcanzada, error)
+        assert diagonales, "los ejes no se movieron simultaneamente"
+        assert all(max(x_ms, y_ms) <= Panel.MOVE_MAX_SEGMENT_MS + 1e-6
+                   for _, x_ms, _, y_ms in diagonales), diagonales
+        primer_x, primer_y = diagonales[0][0], diagonales[0][2]
+        assert primer_x and primer_y, ("el primer tramo no fue diagonal",
+                                       diagonales[0])
+        ratio_esperado = abs(destino[0] - inicio[0]) / abs(destino[1] - inicio[1])
+        ratio_tramo = diagonales[0][1] / diagonales[0][3]
+        assert abs(ratio_tramo - ratio_esperado) < 0.001, (
+            ratio_tramo, ratio_esperado, diagonales[0])
+        assert len(pulsos) <= 6, ("demasiados pulsos para el ajuste", pulsos)
+        assert pulsos and all(ms <= Panel.JOG_MAX_MS for _, ms, _ in pulsos)
+        assert all(0.0 <= q[0] <= 500.0 and 0.0 <= q[1] <= 400.0
+                   for _, _, q in pulsos), pulsos[-1]
+    # Un jog con polaridad fisica invertida debe abortar cerca del inicio,
+    # no seguir hasta el limite seguro del eje.
+    wrong_pos = [200.0, 200.0]
+    pn.position = lambda t=0: tuple(wrong_pos)
+
+    def jog_invertido(key, parar, corte, **kw):
+        sign = 1 if key[0] == "+" else -1
+        wrong_pos[0] -= sign * 0.6
+        actual = tuple(wrong_pos)
+        if corte(actual):
+            return actual
+        wrong_pos[0] -= sign * 0.6
+        actual = tuple(wrong_pos)
+        corte(actual)
+        return actual
+
+    pn.jog_hold = jog_invertido
+    try:
+        pn._ir_hacia("+X", 230.0, desde=(200.0, 200.0))
+        raise AssertionError("un jog invertido no se cancelo")
+    except RuntimeError as e:
+        assert "sentido contrario" in str(e), str(e)
+    assert wrong_pos[0] >= 199.0, ("el jog invertido avanzo demasiado", wrong_pos)
+    pn.position = lambda t=0: tuple(wrong_pos)
+
+    def pulso_invertido(key, ms):
+        wrong_pos[0] += -0.6 if key == "+X" else 0.6
+
+    pn.hold = pulso_invertido
+    pn.settled = lambda *a, **kw: tuple(wrong_pos)
+    try:
+        pn.move_to(205.0, 200.0, verbose=False)
+        raise AssertionError("un pulso invertido no se cancelo")
+    except RuntimeError as e:
+        assert "sentido contrario" in str(e), str(e)
+    assert wrong_pos[0] >= 198.0, ("el pulso invertido avanzo demasiado", wrong_pos)
+    pn.s.sent[:] = []
+    pn.stop()
+    teclas = list(pn.JOG.values())
+    assert pn._stop_event.is_set(), "stop no cancelo el movimiento"
+    assert pn.s.sent == [bytes([0xA5, 0x51, k]) for k in teclas], pn.s.sent
+    pn.resume()
+    assert not pn._stop_event.is_set(), "resume no rearmo el panel"
+    assert Panel.move_to.__defaults__[2] == 120.0
+    assert move_and_wait.__defaults__[1] == 120.0
+    stopped_pos = [200.0, 200.0]
+    pn.position = lambda t=0: tuple(stopped_pos)
+
+    def parar_durante_pulso(key, ms):
+        stopped_pos[0] += 1.0
+        pn.stop()
+    pn.hold = parar_durante_pulso
+    pn.settled = lambda *a, **kw: tuple(stopped_pos)
+
+    try:
+        pn.move_to(205.0, 200.0, verbose=False)
+        raise AssertionError("move_to ignoro PARAR")
+    except InterruptedError as e:
+        assert "detenido" in str(e), str(e)
+    assert stopped_pos == [201.0, 200.0], ("move_to siguio tras PARAR", stopped_pos)
     # el detector de magic tiene que encontrar un magic que no es el de defecto
     moves = b"".join(b"\x89" + enc_rel(dx, dy) for dx, dy in
                      ((4.0, 2.0), (-1.5, 3.0), (2.0, -2.0), (0.5, 0.5),
