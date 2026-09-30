@@ -19,6 +19,7 @@ import time
 MAGIC = 0x88
 PORT_MOVE, SRC_MOVE = 50200, 40200
 PORT_PANEL, SRC_PANEL = 50207, 40207
+NATIVE_POSITION_MOVE_ENABLED = True
 
 ACK = (0xC6, 0xCC)
 ERR = (0x46, 0xCF)
@@ -108,11 +109,12 @@ class Ruida:
         self.s.connect((ip, PORT_MOVE))
         self.s.settimeout(timeout)
 
-    def _tx(self, payload, expect_ack=True):
+    def _tx(self, payload, expect_ack=True, retries=None):
         data = swz(payload, self.magic)
         cs = sum(data) & 0xFFFF
         pkt = bytes([cs >> 8, cs & 0xFF]) + data
-        for attempt in range(self.retries + 1):
+        retries = self.retries if retries is None else retries
+        for attempt in range(retries + 1):
             self.s.send(pkt)
             try:
                 r = self.s.recv(16)
@@ -128,15 +130,29 @@ class Ruida:
             if r and r[0] not in ERR and r:
                 if self.verbose:
                     print("[ruida] respuesta inesperada %s (no ACK)" % r.hex())
-                return
+                raise IOError("respuesta inesperada de la controladora: %s"
+                              % r.hex())
             if self.verbose:
                 print("[ruida] sin ACK, reintento %d/%d %s"
-                      % (attempt + 1, self.retries, r.hex() if r else "timeout"))
+                      % (attempt + 1, retries, r.hex() if r else "timeout"))
         raise IOError("la controladora no confirma el comando %s" % payload.hex())
 
     def move_abs(self, x, y):
         """Viaje con láser apagado a (x, y) mm absolutos."""
         self._tx(b"\x88" + enc(x, 5) + enc(y, 5))
+
+    def move_to_position(self, x, y):
+        """Envía el movimiento a coordenadas usado por LightBurn Move > Go.
+
+        La forma D9 10 00 <X><Y> y su datagrama UDP se contrastaron con la
+        captura de LightBurn en la controladora de esta máquina.
+        """
+        x0, x1, y0, y1 = Panel.SAFE
+        if not (math.isfinite(x) and math.isfinite(y)
+                and x0 <= x <= x1 and y0 <= y <= y1):
+            raise ValueError("destino fuera del area segura: %.3f, %.3f" % (x, y))
+        payload = b"\xd9\x10\x00" + enc(x, 5) + enc(y, 5)
+        self._tx(payload, retries=0)
 
     def set_param(self, param, value):
         """Escribe un parametro de la controladora (paquete `e7`).
@@ -273,6 +289,7 @@ class Panel:
     # (dos pulsos de 1 ms dan los mismos 0.219 mm), asi que un bucle cerrado
     # converge a esa rejilla.
     JOG = {"+X": 0x01, "-X": 0x02, "-Y": 0x03, "+Y": 0x04}
+    AUTOMATIC_MOVE_ENABLED = False
     # Medido en esta maquina (1..100 ms), ver README:
     #   1 ms -> 0.219 mm   10 ms -> 0.498   50 ms -> 2.264   100 ms -> 6.150
     # o sea ~0.19 mm de tiempo muerto + 0.066 mm/ms. Con pulsos largos la
@@ -296,10 +313,6 @@ class Panel:
     # de equivocarse, porque nunca sobrepasa lo previsto. Y el tope de 100 ms
     # impide que un pulso se vaya al tope de recorrido.
     JOG_MAX_MS = 100.0
-    MOVE_COARSE_MM = 8.0
-    MOVE_BRAKE_MM = 4.0
-    MOVE_MAX_SEGMENT_MS = 400.0
-    MOVE_SAFE_MARGIN_MM = 15.0
     # Caja de viaje segura. Medida en esta maquina: el tope del recorrido esta
     # en 500.049 x 400.046. ponytail:Measure con el cabezal en las cuatro
     # esquinas y ajusta; si el soft limit real es menor, baja estos numeros.
@@ -316,28 +329,6 @@ class Panel:
         self.s.sendall(bytes([0xA5, 0x50, self.JOG[key]]))
         time.sleep(ms / 1000.0)
         self.s.sendall(bytes([0xA5, 0x51, self.JOG[key]]))
-
-    def hold_vector(self, x_key, x_ms, y_key, y_ms):
-        """Ejecuta un tramo XY temporizado, liberando cada eje al vencer."""
-        if self._stop_event.is_set():
-            raise InterruptedError("movimiento detenido por el usuario")
-        active = []
-        started = time.monotonic()
-        try:
-            for key, duration in ((x_key, x_ms), (y_key, y_ms)):
-                if key is None or duration <= 0:
-                    continue
-                code = self.JOG[key]
-                self.s.sendall(bytes([0xA5, 0x50, code]))
-                active.append((key, code, started + duration / 1000.0))
-            for key, code, deadline in sorted(active, key=lambda item: item[2]):
-                if self._stop_event.wait(max(0.0, deadline - time.monotonic())):
-                    raise InterruptedError("movimiento detenido por el usuario")
-                self.s.sendall(bytes([0xA5, 0x51, code]))
-                active = [item for item in active if item[1] != code]
-        finally:
-            for _, code, _ in active:
-                self.s.sendall(bytes([0xA5, 0x51, code]))
 
     def jog_hold(self, key, parar, margen=10.0, poll=0.08, max_ms=120000.0,
                  verbose=True, corte=None):
@@ -451,178 +442,63 @@ class Panel:
         return p if self._ok(p) else None
 
     def move_to(self, x, y, tol=0.1, tries=250, budget=120.0, verbose=True):
-        """Lleva el cabezal a (x, y) mm.
-
-        Los tramos largos coordinan ambos ejes en una diagonal temporizada.
-        Cada segmento tiene una duracion maxima, tras la cual se relee la
-        posicion; la duracion por eje conserva la proporcion hacia el destino.
-        Los pulsos se reservan para el ajuste final. Se evita dejar un jog
-        continuo esperando una lectura de posicion que puede llegar tarde.
-        """
-        x0, x1, y0, y1 = self.SAFE
-        if not (x0 <= x <= x1 and y0 <= y <= y1):
-            raise ValueError("destino %.3f, %.3f fuera de la caja %s"
-                             % (x, y, self.SAFE))
-        self.resume()
-        t0 = time.time()
-        p = self.position(2.0)
-        if not self._ok(p):
-            raise RuntimeError("sin lectura valida de la posicion inicial")
-
-        rates = [self.JOG_RATE, self.JOG_RATE]
-        for _ in range(tries):
-            if self._stop_event.is_set():
-                raise InterruptedError("movimiento detenido por el usuario")
-            if time.time() - t0 > budget:
-                break
-            dx, dy = x - p[0], y - p[1]
-            if max(abs(dx), abs(dy)) <= self.MOVE_COARSE_MM:
-                break
-            deltas = [dx, dy]
-            active_axes = [abs(delta) > self.MOVE_COARSE_MM
-                           for delta in deltas]
-            bounds = (x1, y1)
-            safe_dists = []
-            for i, delta in enumerate(deltas):
-                if delta > 0:
-                    safe_dists.append(max(
-                        0.0, bounds[i] - p[i] - self.MOVE_SAFE_MARGIN_MM))
-                else:
-                    safe_dists.append(max(
-                        0.0, p[i] - (x0, y0)[i] - self.MOVE_SAFE_MARGIN_MM))
-            progress = [
-                min(1.0, max(0.0, 1.0 - self.MOVE_BRAKE_MM / abs(deltas[i])),
-                    safe_dists[i] / abs(deltas[i]))
-                for i in range(2) if active_axes[i]
-            ]
-            fraction = min(progress, default=0.0)
-            raw_ms = [
-                abs(deltas[i]) * fraction / rates[i] if active_axes[i] else 0.0
-                for i in range(2)
-            ]
-            longest = max(raw_ms)
-            if longest <= 0:
-                break
-            scale = min(1.0, self.MOVE_MAX_SEGMENT_MS / longest)
-            durations = [duration * scale for duration in raw_ms]
-            # Mantener una direccion diagonal recta requiere que ambas teclas
-            # empiecen juntas y cada una se suelte cuando complete su proporcion.
-            keys = [
-                ("+" if dx > 0 else "-") + "X" if durations[0] > 0 else None,
-                ("+" if dy > 0 else "-") + "Y" if durations[1] > 0 else None,
-            ]
-            if verbose:
-                print("[jog] diagonal: %.3f, %.3f -> %.3f, %.3f; "
-                      "tramo %.0f/%.0f ms"
-                      % (p[0], p[1], x, y, durations[0], durations[1]))
-            self.hold_vector(keys[0], durations[0], keys[1], durations[1])
-            if self._stop_event.is_set():
-                raise InterruptedError("movimiento detenido por el usuario")
-            actual = self.position(2.0)
-            if not self._ok(actual):
-                raise RuntimeError("sin lectura valida despues del tramo diagonal")
-            moved = [actual[0] - p[0], actual[1] - p[1]]
-            requested = [dx, dy]
-            for axis, delta, direction in zip(("X", "Y"), moved, requested):
-                if abs(direction) > self.MOVE_COARSE_MM and delta * direction < -0.05:
-                    raise RuntimeError(
-                        "el tramo diagonal movio %s en sentido contrario "
-                        "(%.3f mm); movimiento cancelado" % (axis, delta))
-            for i, duration in enumerate(durations):
-                if duration > 0:
-                    measured = abs(moved[i]) / duration
-                    if measured > 0.001:
-                        rates[i] = min(0.15, max(0.005, measured))
-            if verbose:
-                print("[jog] lectura tras diagonal: %.3f, %.3f "
-                      "(cambio %+.3f, %+.3f)"
-                      % (actual[0], actual[1], moved[0], moved[1]))
-            p = actual
-
-        for i in range(tries):
-            if self._stop_event.is_set():
-                raise InterruptedError("movimiento detenido por el usuario")
-            if time.time() - t0 > budget:
-                break
-            if not self._ok(p):
-                if verbose:
-                    print("[jog] lectura no creible, reintento")
-                p = self.position(2.0)
-                continue
-            dx, dy = x - p[0], y - p[1]
-            if max(abs(dx), abs(dy)) <= tol:
-                return p
-            if verbose:
-                print("[jog] destino %.3f, %.3f; posicion %.3f, %.3f; "
-                      "diferencia %.3f, %.3f"
-                      % (x, y, p[0], p[1], dx, dy))
-            for axis, indice, destino in (("X", 0, x), ("Y", 1, y)):
-                if self._stop_event.is_set():
-                    raise InterruptedError("movimiento detenido por el usuario")
-                d = destino - p[indice]
-                if abs(d) <= tol:
-                    continue
-                ms = (abs(d) - self.JOG_STEP) / self.JOG_RATE
-                ms = min(self.JOG_MAX_MS, max(1.0, ms))
-                # no acercarse al tope de viaje desde fuera
-                cur = p[indice]
-                if verbose:
-                    print("[jog] pulso %s desde %.3f por %.1f ms"
-                          % (axis, cur, ms))
-                room = (x1 - cur) if d > 0 else (cur - x0)
-                max_safe_ms = (room - 1.5 - self.JOG_STEP) / self.JOG_RATE
-                if max_safe_ms < 1.0:
-                    raise RuntimeError(
-                        "no hay margen seguro para el pulso de %s; "
-                        "posicion %.3f, limite %.3f" % (axis, cur,
-                        x1 if axis == "X" and d > 0 else
-                        x0 if axis == "X" else y1 if d > 0 else y0))
-                ms = min(ms, max_safe_ms)
-                self.hold(("+" if d > 0 else "-") + axis, ms)
-                if self._stop_event.is_set():
-                    raise InterruptedError("movimiento detenido por el usuario")
-                actual = self.position(2.0)
-                if not self._ok(actual):
-                    raise RuntimeError(
-                        "sin lectura valida despues del pulso %s; movimiento "
-                        "cancelado" % axis)
-                desplazamiento = actual[indice] - cur
-                if desplazamiento * (1 if d > 0 else -1) < -0.05:
-                    raise RuntimeError(
-                        "el pulso de %s movio el eje en sentido contrario "
-                        "(%.3f mm); movimiento cancelado"
-                        % (axis, desplazamiento))
-                p = actual
-                if verbose:
-                    print("[jog] pulso %s: lectura %.3f (cambio %+.3f mm)"
-                          % (axis, actual[indice], desplazamiento))
-            if verbose:
-                print("[jog] %7.3f, %7.3f -> faltan %.3f, %.3f"
-                      % (p[0], p[1], dx, dy))
-        p = self.settled()
-        if p and verbose and max(abs(x - p[0]), abs(y - p[1])) > tol:
-            print("[jog] AVISO: se queda en %.3f, %.3f (pedidos %.3f, %.3f)"
-                  % (p[0], p[1], x, y))
-        return p
+        """No calcula destinos mediante pulsaciones del panel."""
+        raise RuntimeError(
+            "Panel.move_to no esta disponible; usa el comando nativo "
+            "Ruida.move_to_position con lectura de posicion")
 
     def close(self):
         self.s.close()
 
 
-def move_and_wait(pan, x, y, tol=0.1, timeout=120.0):
-    """Lleva el cabezal a (x, y) mm y devuelve la posicion real.
+def move_and_wait(pan, link, x, y, tol=0.5, timeout=120.0):
+    """Ordena un viaje nativo X/Y y verifica su llegada por el panel 50207."""
+    if pan is None or link is None:
+        raise RuntimeError("se necesitan las conexiones Ruida 50200 y 50207")
+    x0, x1, y0, y1 = Panel.SAFE
+    if not (math.isfinite(x) and math.isfinite(y)
+            and x0 <= x <= x1 and y0 <= y <= y1):
+        raise ValueError("destino fuera del area segura: %.3f, %.3f" % (x, y))
+    if not (math.isfinite(tol) and tol > 0
+            and math.isfinite(timeout) and timeout > 0):
+        raise ValueError("tolerancia y timeout deben ser positivos y finitos")
 
-    El movimiento va por el teclado del 50207, no por move_abs del 50200: en
-    esta controladora los paquetes 0x88 sueltos se confirman con un c6 pero no
-    mueven nada, solo ejecutan cuando forman parte de un trabajo .rd. El 50200
-    se queda para analizar ficheros, no para mover el cabezal.
+    start = pan.position(3.0)
+    if not pan._ok(start):
+        raise RuntimeError("no se pudo leer una posicion inicial valida")
+    if math.dist(start, (x, y)) <= tol:
+        return start
 
-    Sin panel no hay quien mueva: se avisa y se devuelve None en vez de fingir
-    un movimiento que no ocurrio."""
-    if pan is None:
-        print("AVISO: sin 50207 no puedo mover el cabezal")
-        return None
-    return pan.move_to(x, y, tol=tol, budget=timeout)
+    if pan.verbose:
+        print("[move] Go nativo Ruida: %.3f, %.3f -> %.3f, %.3f"
+              % (start[0], start[1], x, y))
+    link.move_to_position(x, y)
+
+    deadline = time.monotonic() + timeout
+    stable = 0
+    last = start
+    while time.monotonic() < deadline:
+        time.sleep(0.2)
+        pos = pan.position(min(3.0, max(0.1, deadline - time.monotonic())))
+        if not pan._ok(pos):
+            raise RuntimeError(
+                "se perdio la lectura de posicion durante el movimiento; "
+                "el comando nativo no se puede cancelar")
+        last = pos
+        if math.dist(pos, (x, y)) <= tol:
+            stable += 1
+            if stable >= 2:
+                if pan.verbose:
+                    print("[move] destino confirmado: %.3f, %.3f" % pos)
+                return pos
+        else:
+            stable = 0
+
+    raise TimeoutError(
+        "el movimiento nativo sigue sin confirmarse tras %.1f s; ultima "
+        "posicion %.3f, %.3f, destino %.3f, %.3f. No envia otro comando: "
+        "este viaje no admite cancelacion desde la app."
+        % (timeout, last[0], last[1], x, y))
 
 
 # ------------------------------------------------------------------ autocomprobado
@@ -642,6 +518,83 @@ def selftest():
     assert dec_rel(enc_rel(1.234, -5.678)) == (1.234, -5.678)
     for d in (0.0, 0.001, 1.234, 350.0, 900.123):
         assert dec(enc(d, 5)) == round(d, 3)
+    class MoveSock:
+        def __init__(self, reply=b"\xc6"):
+            self.reply = reply
+            self.sent = []
+
+        def send(self, data):
+            self.sent.append(data)
+
+        def recv(self, size):
+            if self.reply is None:
+                raise socket.timeout()
+            return self.reply
+
+    native = Ruida.__new__(Ruida)
+    native.ip, native.magic, native.retries, native.verbose = (
+        "192.168.1.50", MAGIC, 3, False)
+    for x, y, packet in (
+            (183.010, 80.000,
+             "06 32 52 99 89 89 89 03 1d eb 89 89 8d 79 89"),
+            (199.740, 349.280,
+             "07 0a 52 99 89 89 89 85 91 b5 89 89 1d a1 e9"),
+            (419.960, 349.278,
+             "07 08 52 99 89 89 89 11 d9 f1 89 89 1d a1 d7")):
+        native.s = MoveSock()
+        native.move_to_position(x, y)
+        assert native.s.sent == [bytes.fromhex(packet)], (x, y, native.s.sent)
+    native.s.sent[:] = []
+    try:
+        native.move_to_position(500.001, 200.0)
+        raise AssertionError("el destino sobre el limite fue aceptado")
+    except ValueError as e:
+        assert "area segura" in str(e), str(e)
+    assert not native.s.sent, "un destino inseguro envio datagrama"
+    native.s = MoveSock(reply=None)
+    try:
+        native.move_to_position(419.960, 349.278)
+        raise AssertionError("un viaje sin ACK se dio por confirmado")
+    except IOError as e:
+        assert "no confirma" in str(e), str(e)
+    assert len(native.s.sent) == 1, "se reintento un viaje cuyo ACK se perdio"
+    class PositionPanel:
+        verbose = False
+
+        def __init__(self):
+            self.positions = iter(((20.0, 20.0), (180.0, 80.0),
+                                   (419.96, 349.278), (419.96, 349.278)))
+
+        def position(self, timeout=3.0):
+            return next(self.positions)
+
+        def _ok(self, pos):
+            return pos is not None and Panel.SAFE[0] <= pos[0] <= Panel.SAFE[1] \
+                and Panel.SAFE[2] <= pos[1] <= Panel.SAFE[3]
+
+    class PositionLink:
+        def __init__(self):
+            self.targets = []
+
+        def move_to_position(self, x, y):
+            self.targets.append((x, y))
+
+    fake_panel, fake_link = PositionPanel(), PositionLink()
+    real_sleep = time.sleep
+    time.sleep = lambda seconds: None
+    try:
+        reached = move_and_wait(fake_panel, fake_link, 419.960, 349.278)
+    finally:
+        time.sleep = real_sleep
+    assert reached == (419.96, 349.278), reached
+    assert fake_link.targets == [(419.960, 349.278)], fake_link.targets
+    try:
+        move_and_wait(fake_panel, fake_link, -0.001, 20.0)
+        raise AssertionError("move_and_wait acepto un destino fuera de SAFE")
+    except ValueError as e:
+        assert "area segura" in str(e), str(e)
+    assert fake_link.targets == [(419.960, 349.278)], fake_link.targets
+
     p = bytes.fromhex("a56800003d046d0000244f6f")
     assert (dec(p[2:7]), dec(p[7:12])) == (1000.045, 600.047)
     assert _xy(p[2:12]) == (1000.045, 600.047)
@@ -720,12 +673,6 @@ def selftest():
     pn.s.sent[:] = []
     pn.jog_hold("+Y", Nadie(), poll=0.01, verbose=False)
     assert pn.s.sent[-1].hex() == "a55104", "ni corto ni solto en el tope"
-    pn.s.sent[:] = []
-    pn.hold_vector("+X", 2.0, "-Y", 4.0)
-    assert pn.s.sent[:2] == [bytes.fromhex("a55001"), bytes.fromhex("a55003")]
-    assert pn.s.sent.count(bytes.fromhex("a55101")) == 1
-    assert pn.s.sent.count(bytes.fromhex("a55103")) == 1
-    assert pn.s.sent[-1] == bytes.fromhex("a55103"), pn.s.sent
     # El jog manual corta al alcanzar destino y no solo por el tope.
     pos = [200.0]
 
@@ -758,58 +705,14 @@ def selftest():
     pn.jog_hold = jog_con_lectura_tardia
     p = pn._ir_hacia("+X", 205.0, margen=3.0, desde=(190.0, 200.0))
     assert p == (210.0, 200.0), p
-    # Los tramos largos avanzan en diagonal con tiempos proporcionales por eje,
-    # releen posicion entre segmentos y reservan pulsos para el ajuste final.
-    for inicio, destino in (((149.139, 0.034), (333.711, 123.838)),
-                            ((500.0, 400.0), (333.711, 123.838))):
-        sim_pos = list(inicio)
-        pulsos = []
-        diagonales = []
-
-        def pos_simulada(timeout=0):
-            return tuple(sim_pos)
-
-        def settled_no_deberia_llamarse(*a, **kw):
-            raise AssertionError("move_to repitio lecturas settled innecesarias")
-
-        def pulso_simulado(key, ms):
-            axis = 0 if key[1] == "X" else 1
-            sign = 1 if key[0] == "+" else -1
-            paso = Panel.JOG_STEP + ms * Panel.JOG_RATE
-            sim_pos[axis] += sign * paso
-            pulsos.append((key, ms, tuple(sim_pos)))
-
-        def vector_simulado(x_key, x_ms, y_key, y_ms):
-            diagonales.append((x_key, x_ms, y_key, y_ms))
-            for axis, key, ms in ((0, x_key, x_ms), (1, y_key, y_ms)):
-                if key and ms > 0:
-                    sign = 1 if key[0] == "+" else -1
-                    sim_pos[axis] += sign * ms * Panel.JOG_RATE
-            assert 0.0 <= sim_pos[0] <= 500.0
-            assert 0.0 <= sim_pos[1] <= 400.0
-
-        pn.position = pos_simulada
-        pn.settled = settled_no_deberia_llamarse
-        pn.hold = pulso_simulado
-        pn.hold_vector = vector_simulado
-        alcanzada = pn.move_to(*destino, verbose=False)
-        error = math.hypot(alcanzada[0] - destino[0],
-                           alcanzada[1] - destino[1])
-        assert error <= 0.5, (inicio, destino, alcanzada, error)
-        assert diagonales, "los ejes no se movieron simultaneamente"
-        assert all(max(x_ms, y_ms) <= Panel.MOVE_MAX_SEGMENT_MS + 1e-6
-                   for _, x_ms, _, y_ms in diagonales), diagonales
-        primer_x, primer_y = diagonales[0][0], diagonales[0][2]
-        assert primer_x and primer_y, ("el primer tramo no fue diagonal",
-                                       diagonales[0])
-        ratio_esperado = abs(destino[0] - inicio[0]) / abs(destino[1] - inicio[1])
-        ratio_tramo = diagonales[0][1] / diagonales[0][3]
-        assert abs(ratio_tramo - ratio_esperado) < 0.001, (
-            ratio_tramo, ratio_esperado, diagonales[0])
-        assert len(pulsos) <= 6, ("demasiados pulsos para el ajuste", pulsos)
-        assert pulsos and all(ms <= Panel.JOG_MAX_MS for _, ms, _ in pulsos)
-        assert all(0.0 <= q[0] <= 500.0 and 0.0 <= q[1] <= 400.0
-                   for _, _, q in pulsos), pulsos[-1]
+    assert not Panel.AUTOMATIC_MOVE_ENABLED
+    pn.s.sent[:] = []
+    try:
+        pn.move_to(300.0, 200.0, verbose=False)
+        raise AssertionError("Panel.move_to permitio un destino automatico")
+    except RuntimeError as e:
+        assert "Panel.move_to no esta disponible" in str(e), str(e)
+    assert not pn.s.sent, "move_to envio teclas aunque esta suspendido"
     # Un jog con polaridad fisica invertida debe abortar cerca del inicio,
     # no seguir hasta el limite seguro del eje.
     wrong_pos = [200.0, 200.0]
@@ -833,19 +736,6 @@ def selftest():
     except RuntimeError as e:
         assert "sentido contrario" in str(e), str(e)
     assert wrong_pos[0] >= 199.0, ("el jog invertido avanzo demasiado", wrong_pos)
-    pn.position = lambda t=0: tuple(wrong_pos)
-
-    def pulso_invertido(key, ms):
-        wrong_pos[0] += -0.6 if key == "+X" else 0.6
-
-    pn.hold = pulso_invertido
-    pn.settled = lambda *a, **kw: tuple(wrong_pos)
-    try:
-        pn.move_to(205.0, 200.0, verbose=False)
-        raise AssertionError("un pulso invertido no se cancelo")
-    except RuntimeError as e:
-        assert "sentido contrario" in str(e), str(e)
-    assert wrong_pos[0] >= 198.0, ("el pulso invertido avanzo demasiado", wrong_pos)
     pn.s.sent[:] = []
     pn.stop()
     teclas = list(pn.JOG.values())
@@ -855,21 +745,11 @@ def selftest():
     assert not pn._stop_event.is_set(), "resume no rearmo el panel"
     assert Panel.move_to.__defaults__[2] == 120.0
     assert move_and_wait.__defaults__[1] == 120.0
-    stopped_pos = [200.0, 200.0]
-    pn.position = lambda t=0: tuple(stopped_pos)
-
-    def parar_durante_pulso(key, ms):
-        stopped_pos[0] += 1.0
-        pn.stop()
-    pn.hold = parar_durante_pulso
-    pn.settled = lambda *a, **kw: tuple(stopped_pos)
-
     try:
         pn.move_to(205.0, 200.0, verbose=False)
-        raise AssertionError("move_to ignoro PARAR")
-    except InterruptedError as e:
-        assert "detenido" in str(e), str(e)
-    assert stopped_pos == [201.0, 200.0], ("move_to siguio tras PARAR", stopped_pos)
+        raise AssertionError("Panel.move_to permitio movimiento por teclas")
+    except RuntimeError as e:
+        assert "Panel.move_to no esta disponible" in str(e), str(e)
     # el detector de magic tiene que encontrar un magic que no es el de defecto
     moves = b"".join(b"\x89" + enc_rel(dx, dy) for dx, dy in
                      ((4.0, 2.0), (-1.5, 3.0), (2.0, -2.0), (0.5, 0.5),
@@ -991,26 +871,31 @@ def main():
                 print("%s%s" % (d.hex(" "), extra))
         except KeyboardInterrupt:
             return
-    if not a.yes and not _confirm("Mover a %.3f, %.3f mm" % (a.x, a.y)):
+    if not a.yes and not _confirm(
+            "Viaje nativo a %.3f, %.3f mm; no se puede cancelar desde el "
+            "software. Continua" % (a.x, a.y)):
         return
     pan = Panel(a.ip, verbose=a.verbose)
-    was = pan.handshake() and pan.position(2.0)
+    link = None
     try:
+        if not pan.handshake():
+            raise RuntimeError("la Ruida no respondio en el canal de posicion 50207")
+        was = pan.position(2.0)
+        if not pan._ok(was):
+            raise RuntimeError("no se pudo leer una posicion inicial valida")
         if a.cmd == "move":
-            pan.move_to(a.x, a.y, tol=0.3, budget=60.0)
+            x, y = a.x, a.y
         else:
-            # el 50200 no mueve en esta controladora; el desplazamiento
-            # relativo se hace encadenando pulsos de teclado
-            if was is None:
-                print("sin informe de posicion, no puedo calcular el jog")
-                return
-            pan.move_to(was[0] + a.x, was[1] + a.y, tol=0.3, budget=60.0)
-        if was:
-            time.sleep(1.0)
-            now = pan.position(3.0)
-            print("posicion: %s -> %s" % (was, now if now else "sin informe"))
+            x, y = was[0] + a.x, was[1] + a.y
+        link = Ruida(a.ip, magic=a.magic, src=a.src, verbose=a.verbose)
+        now = move_and_wait(pan, link, x, y, tol=0.3, timeout=60.0)
+        print("posicion: %s -> %s" % (was, now))
     finally:
-        pan.close()
+        try:
+            pan.close()
+        finally:
+            if link:
+                link.close()
 
 
 if __name__ == "__main__":

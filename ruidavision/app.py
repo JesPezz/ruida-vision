@@ -257,12 +257,19 @@ class Foto(tk.Canvas):
         self.delete("marcas")
         for i, (u, v) in enumerate(self.detectadas, 1):
             x, y = u * self.esc + self.ox, v * self.esc + self.oy
-            r = max(6.0, 5 * self.esc)
-            self.create_oval(x - r, y - r, x + r, y + r, outline="#00ff88",
-                             width=2, tags="marcas")
-            self.create_text(x + r + 2, y - r, text=str(i), fill="#00ff88",
-                             anchor="sw", font=("Segoe UI", 9, "bold"),
-                             tags="marcas")
+            r = max(12.0, 8 * self.esc)
+            tags = ("marcas", "marca-%d" % i)
+            self.create_oval(x - r, y - r, x + r, y + r,
+                             outline="#ffffff", width=5, tags=tags)
+            self.create_oval(x - r, y - r, x + r, y + r,
+                             outline="#00ff88", width=3, tags=tags)
+            self.create_line(x - r - 5, y, x + r + 5, y,
+                             fill="#00ff88", width=2, tags=tags)
+            self.create_line(x, y - r - 5, x, y + r + 5,
+                             fill="#00ff88", width=2, tags=tags)
+            self.create_text(x + r + 4, y - r - 2, text=str(i),
+                             fill="#ffffff", anchor="sw",
+                             font=("Segoe UI", 12, "bold"), tags=tags)
 
     def snap(self, x, y, tol=18.0):
         """El pixel del clic, corregido al centro de la marca detectada mas
@@ -318,6 +325,8 @@ class App(tk.Tk):
         self._jog_t = None               # la pulsacion se esta volviendo continua
         self._jog_p = None               # parada pendiente (debounce del repeat)
         self._jog_ev = None              # Event del continuo en curso
+        self._native_move_active = False
+        self._native_move_fault = False
         # Que visores en vivo hay que pintar en cada hoja. Se dibujan solo los de
         # la hoja visible: pintar los de las dos hojas cada 33 ms son seis
         # conversiones de imagen por segundo y frame que no se ven.
@@ -473,7 +482,12 @@ class App(tk.Tk):
                 ("Origen 0,0", lambda: self.ir_a(0.0, 0.0)),
                 ("Buscar camaras", self.scan_cams),
         )):
-            boton(b, nombre, accion).grid(row=0, column=col, padx=2, sticky="w")
+            btn = boton(b, nombre, accion)
+            if nombre == "Origen 0,0" and not ruida.Panel.AUTOMATIC_MOVE_ENABLED:
+                btn.configure(state="disabled")
+            if nombre == "Origen 0,0":
+                self.btn_origen = btn
+            btn.grid(row=0, column=col, padx=2, sticky="w")
         # El paso, como en LightBurn: un numero que se sube y se baja con -/+
         # en saltos de 0.1, sin desplegable. El desplegable obligaba a soltar el
         # WASD justo cuando hace falta el paso fino, que es con el cabezal en
@@ -681,6 +695,12 @@ class App(tk.Tk):
         self._tarea(self.maq.get().park)
 
     def stop(self):
+        if self._native_move_active:
+            detalle = ("Parar no interrumpe el viaje nativo a coordenadas. "
+                       "Usa el paro fisico de la controladora ante una emergencia.")
+            self.log(detalle)
+            messagebox.showwarning("Viaje nativo en curso", detalle, parent=self)
+            return
         for attr in ("_jog_t", "_jog_p"):
             after_id = getattr(self, attr)
             if after_id is not None:
@@ -721,7 +741,12 @@ class App(tk.Tk):
                 ("Congelar foto", self.cal_foto),
                 ("2. Ajustar H", self.cal_ajusta),
                 ("Quitar punto", self.cal_quita))):
-            boton(b, nombre, cmd).grid(row=0, column=col, padx=2, sticky="w")
+            btn = boton(b, nombre, cmd)
+            if nombre == "1. Estacionar" and not ruida.Panel.AUTOMATIC_MOVE_ENABLED:
+                btn.configure(state="disabled")
+            if nombre == "1. Estacionar":
+                self.btn_cal_park = btn
+            btn.grid(row=0, column=col, padx=2, sticky="w")
         for col, (nombre, cmd) in enumerate((
                 ("Borrar puntos", self.cal_limpia),
                 ("3. Medir FOV", self.fov_foto),
@@ -774,6 +799,9 @@ class App(tk.Tk):
         self.lbl_cal.pack(anchor="w", pady=6)
 
     def cal_park(self):
+        if not ruida.Panel.AUTOMATIC_MOVE_ENABLED:
+            self.log("Estacionar ignorado: movimiento automatico suspendido")
+            return
         self._tarea(self.maq.get().park)
         self.log("estacionamiento en %s" % (self.cfg["park"],))
 
@@ -1102,8 +1130,10 @@ class App(tk.Tk):
             side="left", padx=(8, 2))
         self.btn_mover = boton(b, "Mover", self.mover_marca)
         self.btn_mover.pack(side="left", padx=2)
-        boton(b, "Detectar y centrar los 2", self.run_marcas).pack(
-            side="left", padx=(14, 2))
+        self.btn_run_marcas = boton(b, "Detectar y centrar los 2", self.run_marcas)
+        self.btn_run_marcas.pack(side="left", padx=(14, 2))
+        if not ruida.Panel.AUTOMATIC_MOVE_ENABLED:
+            self.btn_run_marcas.configure(state="disabled")
         self.v_marcas = self._ent(b, "marcas", 2)
         self.v_it = self._ent(b, "iteraciones", 4)
         self.v_tol = self._ent(b, "tolerancia mm", "0.1")
@@ -1138,13 +1168,14 @@ class App(tk.Tk):
                           "cama con las DOS marcas en verde. A la derecha, las "
                           "coordenadas en mm. Clic en una linea = copiarla sola.",
                   style="Chico.TLabel", wraplength=980, justify="left").pack(anchor="w")
-        ttk.Label(h, text="El boton 'Detectar y centrar los 2' hace el ciclo entero sin "
-                          "preguntar: estaciona el cabezal (por eso se le ve ir a una "
-                          "esquina), mira la cama, lleva el cabezal a cada marca y la "
-                          "recentra con la camara del cabezal. 'iteraciones' y "
-                          "'tolerancia' son suyas: cuantas veces recentra cada marca y a "
-                          "que error para.",
+        ttk.Label(h, text="El centrado automatico de los dos puntos en una sola tarea "
+                          "sigue deshabilitado; usa Mover 1 y Mover 2 por separado.",
                   style="Chico.TLabel", wraplength=980, justify="left").pack(anchor="w")
+        ttk.Label(h, text="Mover usa el viaje nativo de LightBurn a coordenadas; "
+                          "no simula teclas. El viaje no se puede cancelar desde la "
+                          "app: deja libre el recorrido y usa el paro fisico ante "
+                          "una emergencia. Cierra LightBurn antes de mover.",
+                  style="Aviso.TLabel", wraplength=980, justify="left").pack(anchor="w")
         self.marcas2 = []             # [(mm, mm)] de los dos puntos del material
         self.i_marca = 0              # a cual va el boton Mover
 
@@ -1162,6 +1193,13 @@ class App(tk.Tk):
         return type("NS", (), d)()
 
     def run_marcas(self):
+        if not ruida.Panel.AUTOMATIC_MOVE_ENABLED:
+            self.log("Detectar y centrar suspendido: movimiento automatico "
+                     "deshabilitado hasta validar la interpolacion")
+            self.lbl_marcas.configure(
+                text="centrado automatico temporalmente deshabilitado",
+                style="Mal.TLabel")
+            return
         self._run(hv.cmd_run, self._ns(marks=int(self.v_marcas.get()),
                                        iters=int(self.v_it.get()),
                                        tol=float(self.v_tol.get().replace(",", ".")),
@@ -1174,6 +1212,13 @@ class App(tk.Tk):
         es lo que hace falta para no perder la referencia de donde se ha
         arrancado. Las manchas fuera del area de trabajo se descartan y no se
         dibujan: solo se pintan las dos que valen."""
+        if self._native_move_fault:
+            messagebox.showwarning(
+                "Movimiento sin confirmar",
+                "No se enviaran mas viajes desde esta sesion. Verifica que el "
+                "cabezal este detenido y reinicia la app antes de volver a mover.",
+                parent=self)
+            return
         self.marcas2, self.i_marca = [], 0
         self.lbl_marcas.configure(text="buscando las manchas...", style="Chico.TLabel")
         self.lbl_punto.configure(text="sin punto: pulsa Detectar los dos puntos",
@@ -1188,8 +1233,19 @@ class App(tk.Tk):
         """El boton que cambia solo: Detectar, luego Mover 1, luego Mover 2, y
         vuelta a empezar. Que se lea lo que toca evita el paso de "¿ahora que
         botón era?"."""
+        if self._native_move_fault:
+            self.btn_mover.configure(text="Mover bloqueado", state="disabled")
+            self.lbl_aviso_marca.configure(
+                text="Movimiento no confirmado: verifica que el cabezal se "
+                     "detuvo y reinicia la app antes de otra prueba.")
+            return
         if not self.marcas2:
             self.btn_mover.configure(text="Mover", state="disabled")
+            return
+        if not ruida.NATIVE_POSITION_MOVE_ENABLED:
+            self.btn_mover.configure(text="Mover (suspendido)", state="disabled")
+            self.lbl_aviso_marca.configure(
+                text="El viaje nativo a coordenadas esta deshabilitado.")
             return
         i = self.i_marca
         self.btn_mover.configure(
@@ -1198,6 +1254,12 @@ class App(tk.Tk):
 
     def mover_marca(self):
         """Pasos 3 y 4: llevar el cabezal al punto 1 y luego al punto 2."""
+        if self._native_move_fault:
+            self.log("Mover bloqueado: primero verifica la posicion fisica")
+            return
+        if not ruida.NATIVE_POSITION_MOVE_ENABLED:
+            self.log("Mover ignorado: viaje nativo a coordenadas deshabilitado")
+            return
         if not self.marcas2:
             self.log("aun no hay puntos: pulsa Detectar los dos puntos")
             return
@@ -1206,6 +1268,7 @@ class App(tk.Tk):
             self.detectar()
             return
         mm = self.marcas2[i]
+        self._native_move_active = True
         self.btn_mover.configure(text="Moviendo %d..." % (i + 1), state="disabled")
         self.lbl_marcas.configure(text="moviendo al punto %d..." % (i + 1),
                                   style="Chico.TLabel")
@@ -1216,9 +1279,11 @@ class App(tk.Tk):
                     al_terminar=lambda fu: self._fin_movimiento(i, fu))
 
     def _fin_movimiento(self, i, fu):
+        self._native_move_active = False
         try:
             pos = fu.result()
         except Exception as e:
+            self._native_move_fault = True
             detalle = "ERROR al mover al punto %d: %s" % (i + 1, e)
             self.log(detalle)
             self.lbl_marcas.configure(text=detalle, style="Mal.TLabel")
@@ -1226,8 +1291,9 @@ class App(tk.Tk):
                                       % (i + 1), foreground="#8b1a1a")
             self._boton_mover()
             messagebox.showerror(
-                "Movimiento cancelado",
-                "%s\n\nNo vuelvas a pulsar Mover hasta revisar el registro."
+                "Movimiento no confirmado",
+                "%s\n\nEl viaje nativo no se puede cancelar desde la app. "
+                "Verifica la posicion fisica antes de volver a mover."
                 % detalle, parent=self)
             return
         self._fin_punto(i, pos)
@@ -1239,7 +1305,7 @@ class App(tk.Tk):
         if pan is None or pan.pan is None:
             self.log("sin panel: no se puede mover")
             return None
-        pos = pan.goto(mm[0], mm[1])
+        pos = pan.goto_native(mm[0], mm[1])
         if not _posicion_valida(pos):
             raise RuntimeError("el panel no devolvio una posicion valida al mover")
         error = float(np.hypot(pos[0] - mm[0], pos[1] - mm[1]))
@@ -1320,51 +1386,58 @@ class App(tk.Tk):
         return [], "solo %d manchas de las %d dentro del area de trabajo: %s" % (
             len(dentro), n, "acota el ROI" if not fuera else "las demas estan fuera")
 
-    def _fin_marcas(self, _fu):
-        """El `run` de hybrid_vision deja las coordenadas en coords.txt y la foto
-        de la cama con las manchas en bed.png."""
-        # bed.png es el frame GRIS de la cenital que guardo el run: se relee en
-        # gris, que es lo que espera el detector y el lienzo.
+    def _fin_marcas(self, fu):
+        """Muestra la misma pareja de píxeles que produjo coords.txt."""
+        fallo = ""
+        try:
+            marks = fu.result()
+            if marks is None:
+                raise RuntimeError("la deteccion no devolvio las marcas seleccionadas")
+            marks = list(marks)
+            if any(len(mark) != 2 or len(mark[0]) != 2 or len(mark[1]) != 2
+                   for mark in marks):
+                raise ValueError("formato inesperado de marcas seleccionadas")
+            self.marcas2 = [tuple(map(float, mm)) for mm, _ in marks]
+            self.marcas_utiles = [tuple(map(float, px)) for _, px in marks]
+        except (Exception, SystemExit) as e:
+            fallo = "ERROR al detectar marcas: %s" % e
+            self.marcas2, self.marcas_utiles = [], []
+            self.log(fallo)
+
         g = cv2.imread(hv.BED_PNG, cv2.IMREAD_GRAYSCALE) \
             if os.path.exists(hv.BED_PNG) else None
+        if fallo:
+            self.lbl_marcas.configure(text=fallo, style="Mal.TLabel")
+            self.lbl_punto.configure(text="deteccion cancelada; mira el registro",
+                                     foreground="#8b1a1a")
+        elif len(self.marcas2) >= 2:
+            self.lbl_marcas.configure(
+                text="puntos detectados:  %s mm"
+                     % "   ".join("%.2f, %.2f" % mm for mm in self.marcas2),
+                style="Ok.TLabel")
+            self.lbl_punto.configure(
+                text="puntos detectados: pulsa Mover 1 para viaje nativo Ruida",
+                foreground="#0a7d33")
+        else:
+            self.lbl_marcas.configure(
+                text="solo se seleccionaron %d marcas; se necesitan 2"
+                     % len(self.marcas2), style="Mal.TLabel")
+            self.lbl_punto.configure(text="deteccion incompleta; mira el registro",
+                                     foreground="#8b1a1a")
+        self._boton_mover()
         if g is not None:
-            # Las manchas se vuelven a marcar sobre el PNG con los mismos
-            # parametros: es lo que el detector vio, no un dibujo nuestro. Y
-            # se pinta solo lo que vale: el mismo criterio que descarta lo que
-            # cae fuera del area de trabajo, que es el que se lleva por delante
-            # la pareja mas separada.
-            d = hv.find_marks(g, min_area=self.cfg["min_area"],
-                              max_area=self.cfg["max_area"],
-                              thr=self.cfg["thr"], merge=6)
-            self.marcas2, aviso = self._elige_marcas(d)
-            if aviso:
-                self.lbl_marcas.configure(text=aviso, style="Mal.TLabel")
-            self._boton_mover()
-            if self.marcas2:
-                self.lbl_marcas.configure(
-                    text="puntos detectados:  %s mm"
-                         % "   ".join("%.2f, %.2f" % mm for mm in self.marcas2),
-                    style="Ok.TLabel")
-                # El boton Mover ya esta activo, pero el rotulo de abajo seguia
-                # diciendo "pulsa Detectar los dos puntos": los dos a la vez
-                # parecian contradecirse y el paso no se sabia cual era.
-                self.lbl_punto.configure(
-                    text="puntos detectados: pulsa Mover 1 para llevar el cabezal "
-                         "al punto 1", foreground="#0a7d33")
-            # Las manchas utiles YA SON pixeles: `marcas_utiles` devuelve la
-            # lista de (u, v) que se pinta. Al desempaquetar aqui otra vez por
-            # (mm, px) salia una lista de numeros sueltos, `_pintar_marcas`
-            # reventaba al abrir el primer elemento y se caian la foto con las
-            # marcas en verde, la lista de coordenadas y el resto de _fin_marcas
-            # (todo eso se queda en el log como "ERROR en la interfaz").
             self.foto_marcas.poner(g, self.marcas_utiles)
-        if os.path.exists(COORDS):
+            self.log("marcas dibujadas en visor (%d): %s" %
+                     (len(self.marcas_utiles),
+                      [(round(u, 1), round(v, 1))
+                       for u, v in self.marcas_utiles]))
+        if not fallo and os.path.exists(COORDS):
             self.coords = [l.strip() for l in
                            open(COORDS, encoding="utf-8").read().splitlines() if l.strip()]
             self.lst.delete(0, "end")
             for l in self.coords:
                 self.lst.insert("end", l)
-        else:
+        elif not fallo:
             self.lst.insert("end", "sin coordenadas: mira el registro de abajo")
         if self._volvio and not self.video:
             self.conectar()
@@ -1590,6 +1663,20 @@ class App(tk.Tk):
         os.startfile(LOGF)
 
     def salir(self):
+        if self._native_move_active:
+            messagebox.showwarning(
+                "Viaje nativo en curso",
+                "Espera a que el cabezal llegue al destino antes de cerrar. "
+                "La app no puede cancelar este viaje; ante una emergencia usa "
+                "el paro fisico de la controladora.",
+                parent=self)
+            return
+        if self._native_move_fault and not messagebox.askyesno(
+                "Movimiento sin confirmar",
+                "Confirma que el cabezal esta fisicamente detenido antes de "
+                "cerrar la app.",
+                parent=self):
+            return
         # sin `after` que llegue a correr: cortar aqui mismo y en sincrono
         for t in (self._jog_t, self._jog_p):
             if t:

@@ -386,6 +386,9 @@ def main():
     # puede existir en ninguna hoja.
     chk("Estacionar ya no es un boton suelto (Vivo usa Origen 0,0)",
         "Estacionar" not in nombres and "Origen 0,0" in nombres)
+    chk("Origen 0,0 y Estacionar siguen deshabilitados en la prueba Print and Cut",
+        "disabled" in str(app.btn_origen.state())
+        and "disabled" in str(app.btn_cal_park.state()))
     chk("el boton de buscar actualizaciones ya no existe",
         "Buscar actualizaciones" not in nombres)
     chk("los botones de mover dicen el eje (+Y, +X, -Y, -X)",
@@ -455,18 +458,29 @@ def main():
     app.v_roi.delete(0, "end")
     app.v_roi.insert(0, "0,0,640,480")
     try:
-        app._fin_marcas(None)
+        frame = A.cv2.imread(bed, A.cv2.IMREAD_GRAYSCALE)
+        detected = A.hv.find_marks(
+            frame, min_area=app.cfg["min_area"], max_area=app.cfg["max_area"],
+            thr=app.cfg["thr"], merge=6)
+        expected, _ = A.hv.marcas_utiles(
+            detected, np.eye(3, dtype=np.float32), (0, 0, 640, 480))
+        expected = A.hv.pick_pair(expected)
+        app._fin_marcas(SimpleNamespace(result=lambda: expected))
         chk("al terminar el run se ve la foto de la cama",
             getattr(app.foto_marcas, "foto", None) is not None)
         chk("las coordenadas van a la lista", len(app.lst.get(0, "end")) == 2)
-        # El fallo de verdad: `marcas_utiles` ya devuelve PIXELES, y _fin_marcas
-        # los volvia a desempaquetar por (mm, px). Salia una lista de numeros
-        # sueltos, `_pintar_marcas` reventaba al abrir el primero y se caian la
-        # foto en verde Y la lista. Mirar solo la foto no lo veia.
+        chk("el visor pinta los mismos pixeles devueltos por la deteccion",
+            app.marcas_utiles == [tuple(mark[1]) for mark in expected])
+        chk("las coordenadas mostradas corresponden a las marcas seleccionadas",
+            app.marcas2 == [tuple(mark[0]) for mark in expected])
         chk("el detector deja las DOS marcas para pintar",
-            len(app.foto_marcas.detectadas) == 2)
-        chk("las marcas se dibujan ENCIMA de la foto (2 ovalos + 2 numeros)",
-            len(app.foto_marcas.find_withtag("marcas")) == 4)
+            len(app.foto_marcas.detectadas) == len(expected) == 2)
+        chk("las dos marcas tienen reticulas grandes y numeradas",
+            len(app.foto_marcas.find_withtag("marca-1")) == 5
+            and len(app.foto_marcas.find_withtag("marca-2")) == 5)
+        cajas = [app.foto_marcas.bbox("marca-%d" % i) for i in (1, 2)]
+        chk("las marcas del visor ocupan ubicaciones distintas",
+            all(cajas) and cajas[0] != cajas[1])
     finally:
         A.hv.BED_PNG, A.COORDS = app.__dict__.pop("_bed_real")
         os.unlink(bed)
@@ -497,7 +511,7 @@ def main():
 
     maquina_falsa = SimpleNamespace(
         pan=object(),
-        goto=goto_falso,
+        goto_native=goto_falso,
         pos=lambda: fake[len(movimientos) - 1])
     app.maq = SimpleNamespace(get=lambda: maquina_falsa)
     marcas, aviso = app._elige_marcas(found)
@@ -506,31 +520,44 @@ def main():
         aviso != "" and "fuera" in aviso.lower())
     app.marcas2 = marcas
     app._boton_mover()
-    chk("el boton ofrece mover al punto 1",
-        "Mover 1" in app.btn_mover.cget("text"))
+    chk("Mover habilita el destino nativo al detectar los dos puntos",
+        "disabled" not in str(app.btn_mover.state())
+        and app.btn_mover.cget("text") == "Mover 1")
+
+    def tarea_inline(fn, *args, al_terminar=None, **kwargs):
+        try:
+            result = fn(*args, **kwargs)
+            error = None
+        except Exception as e:
+            result, error = None, e
+        future = SimpleNamespace(
+            result=lambda: (_ for _ in ()).throw(error) if error else result,
+            exception=lambda: error)
+        if al_terminar:
+            al_terminar(future)
+        return future
+
+    app._tarea = tarea_inline
     app.mover_marca()
-    app._fin_punto(0, fake[0])
-    chk("Mover envía el punto 1 a Machine.goto",
-        movimientos == [marcas[0]])
-    chk("tras mover a 1 el boton ofrece el punto 2",
-        "Mover 2" in app.btn_mover.cget("text"))
-    chk("la posicion del punto 1 se lee en pantalla",
-        "PUNTO 1" in app.lbl_punto.cget("text")
-        and "1.500" in app.lbl_punto.cget("text"))
+    chk("Mover 1 envia el primer destino nativo y avanza el flujo",
+        movimientos == [tuple(marcas[0])] and app.i_marca == 1
+        and app.btn_mover.cget("text") == "Mover 2")
     app.mover_marca()
-    app._fin_punto(1, fake[1])
-    chk("Mover envía el punto 2 a Machine.goto",
-        movimientos == marcas)
-    chk("la posicion del punto 2 se lee en pantalla",
-        "PUNTO 2" in app.lbl_punto.cget("text")
-        and "61.000" in app.lbl_punto.cget("text"))
-    chk("en el punto 2 se avisa del offset de LightBurn",
-        "offset" in app.lbl_aviso_marca.cget("text").lower())
-    app._boton_mover()
-    chk("acabados los dos puntos no hay mas que mover",
-        "2" not in app.btn_mover.cget("text"))
-    app.i_marca = 0
-    app._boton_mover()
+    chk("Mover 2 envia el segundo destino nativo",
+        movimientos == [tuple(marcas[0]), tuple(marcas[1])]
+        and app.i_marca == 2)
+    avisos = []
+    showwarning_real = A.messagebox.showwarning
+    A.messagebox.showwarning = lambda *a, **k: avisos.append(a)
+    app._native_move_active = True
+    app.stop()
+    app._native_move_active = False
+    A.messagebox.showwarning = showwarning_real
+    chk("Parar advierte que el viaje nativo no se puede cancelar",
+        avisos and "no interrumpe" in avisos[0][1].lower())
+    chk("centrado automatico tambien queda deshabilitado",
+        "disabled" in str(app.btn_run_marcas.state()))
+    app.marcas2, app.i_marca = marcas, 0
     errores_ui = []
     showerror_real = A.messagebox.showerror
     A.messagebox.showerror = lambda *a, **k: errores_ui.append(a)
@@ -541,8 +568,9 @@ def main():
     bombea(app, 0.3)
     A.messagebox.showerror = showerror_real
     registro = open(A.LOGF, encoding="utf-8").read()
-    chk("si falla el movimiento Mover no salta al punto 2",
-        app.i_marca == 0 and "Mover 1" in app.btn_mover.cget("text"))
+    chk("si falla un movimiento Mover no salta al punto 2",
+        app.i_marca == 0 and app._native_move_fault
+        and "disabled" in str(app.btn_mover.state()))
     chk("el fallo del movimiento se muestra en la pestaña y en un aviso",
         "fallo simulado de jog" in app.lbl_marcas.cget("text")
         and errores_ui and "fallo simulado de jog" in errores_ui[0][1])

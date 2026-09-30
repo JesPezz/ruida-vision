@@ -249,6 +249,7 @@ class Machine:
     def __init__(self, cfg, need_pos=True):
         self.cfg = cfg
         self.pan = ruida.Panel(cfg["ip"]) if need_pos else None
+        self.move_link = None
         # Si la Ruida no contesta hay que decirlo EN PANTALLA, no solo por
         # consola: en la ventana no hay consola y el aviso se perdia.
         self.ok = bool(self.pan and self.pan.handshake())
@@ -256,10 +257,22 @@ class Machine:
             print("AVISO: la Ruida no contesta en 50207; se usara espera fija")
 
     def park(self):
-        return ruida.move_and_wait(self.pan, *self.cfg["park"])
+        return self.goto(*self.cfg["park"])
 
     def goto(self, x, y):
-        return ruida.move_and_wait(self.pan, x, y)
+        raise RuntimeError(
+            "movimiento automatico de workflow suspendido; usa Mover 1/2 "
+            "en Print and Cut para el viaje nativo de prueba")
+
+    def goto_native(self, x, y):
+        if not ruida.NATIVE_POSITION_MOVE_ENABLED:
+            raise RuntimeError("el movimiento nativo a coordenadas esta deshabilitado")
+        if self.pan is None:
+            raise RuntimeError("sin conexion al panel 50207 para confirmar la posicion")
+        if self.move_link is None:
+            self.move_link = ruida.Ruida(
+                self.cfg["ip"], magic=self.cfg.get("magic", ruida.MAGIC))
+        return ruida.move_and_wait(self.pan, self.move_link, x, y)
 
     def pos(self, timeout=1.0):
         if not self.pan:
@@ -267,7 +280,7 @@ class Machine:
         return self.pan.position(timeout)
 
     def close(self):
-        for c in (self.pan,):
+        for c in (self.pan, self.move_link):
             if c:
                 c.close()
 
@@ -824,6 +837,8 @@ def cmd_run(a):
         for i, (x, y) in enumerate(out, 1):
             print("  marca %d:  X = %.3f   Y = %.3f" % (i, x + ox, y + oy))
         save_txt(out, cfg, a)
+        if a.no_move:
+            return marks
     finally:
         for c in (top, head):
             c.release()

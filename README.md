@@ -12,38 +12,39 @@ calib.json        se crea solo en `calibrate` (cámaras, FOV, homografía H, pun
 
 ## Movimiento a las marcas
 
-Los destinos de Print and Cut se recorren en segmentos diagonales temporizados:
-las teclas X/Y comienzan juntas y cada eje se suelta según la proporción de
-distancia restante. Cada segmento se limita a 400 ms y después se vuelve a leer
-la posición; los pulsos se reservan para el ajuste final. El jog continuo sin
-límite temporal se evita porque una respuesta tardía de posición puede dejar
-que el cabezal rebase el destino. La prueba simulada verifica la proporción,
-los límites y la convergencia; la velocidad y el comportamiento de teclas
-simultáneas deben confirmarse en la máquina con el láser apagado.
+**Mover 1 / Mover 2 usa el comando nativo de posición observado en LightBurn**,
+no el jog manual por teclas. Una captura local `ruida_lan_clean.pcap` registró
+`D9 10 00 <X de 5 bytes><Y de 5 bytes>` en UDP 50200. Tres pares decodificados
+coincidieron exactamente con destinos introducidos en LightBurn (183.010,
+80.000), (199.740, 349.280) y (419.960, 349.278) mm; el usuario confirmó que
+el cabezal llegó a ellos. `ruida.py` reproduce ese datagrama, restringe las
+coordenadas a 0..500 × 0..400 mm y verifica la llegada con la posición del panel
+50207. Los opcodes `0x88`/`0x89` sueltos y las teclas simultáneas no son
+equivalentes a este comando.
 
-### Prueba física pendiente
+El viaje nativo **no se puede cancelar desde la aplicación ni desde el botón
+Stop de LightBurn**; el controlador termina el desplazamiento solicitado.
+Print and Cut avanza un punto por pulsación para que el operador pueda revisar
+cada llegada. Durante un viaje, la app advierte que **Parar no lo interrumpe**
+y bloquea el cierre; deja libre la trayectoria y usa el paro físico de la
+controladora ante una emergencia. Cierra LightBurn antes de mover: ambos
+programas usan el puerto local 40200.
 
-La prueba de jog continuo por eje falló: para el destino X=255.035 mm, el
-registro leyó X=359.111 mm y canceló al detectar el sobrepaso. La causa es el
-retraso entre la posición consultada y la respuesta de movimiento, por lo que
-no se debe volver a usar ese modo para posicionar automáticamente.
+`Origen 0,0`, `Estacionar` y **Detectar y centrar los 2** siguen deshabilitados;
+el jog manual permanece en 50207. Antes de probar, verifica que el láser esté
+deshabilitado y deja despejada la trayectoria.
 
-La implementación actual coordina X e Y en tramos diagonales temporizados de
-hasta 400 ms; al final de cada tramo consulta la posición y recalcula el
-segmento. Mantiene un margen de 15 mm de los límites durante el avance grueso,
-comprueba sentido y usa pulsos cortos para el ajuste. Las pruebas de software
-son simuladas: **todavía no se ha confirmado en la máquina que la controladora
-acepte correctamente ambas teclas simultáneas**.
+En la última prueba física, **Mover 1 alcanzó la primera marca**, pero no quedó
+centrado como se esperaba; hay que repetir la calibración y revisar la homografía
+y el offset antes de atribuirlo al movimiento. El detector también clasificó la
+segunda marca fuera del área segura. Investigar la coordenada, ROI y calibración
+sin relajar los límites de viaje.
 
-Para probar desde el código en Windows, cierra cualquier otra instancia y
-ejecuta `py -3 -m ruidavision.app` desde la raíz del repositorio (el `.exe`
-instalado no incluye los cambios de código). Con el láser apagado, prueba un
-solo punto y vigila el cabezal; ten disponible el botón **Parar** y el paro
-físico. Detén la prueba si los ejes no avanzan en la dirección esperada o si
-el primer tramo se aparta de la diagonal. Para diagnosticar, conserva el
-registro `%LOCALAPPDATA%\Ruida Vision\app.log`, especialmente las líneas
-`[jog] diagonal`, `[jog] lectura tras diagonal`, cualquier `ERROR` y la
-posición final.
+La detección resalta las mismas coordenadas/píxeles seleccionados por el
+detector con retículas grandes y numeradas; el registro indica cuántas se
+dibujaron y sus píxeles. Al probar desde el código, abre
+`py -3 -m ruidavision.app` desde la raíz del repositorio y revisa
+`%LOCALAPPDATA%\Ruida Vision\app.log`.
 
 ## Qué cambió en la v1.9
 
@@ -152,8 +153,10 @@ Lo que se arregló en esta versión, con lo medido en esta máquina:
 - **Origen y destinos iban a tirones.** En la v1.5 `move_to` era todo pulsos de 100 ms
   (3,4 mm) con una lectura de posición en medio: una rampa de aceleración por cada
   3,4 mm. Esa versión pasó a jog continuo por eje (~5 mm/s), pero el corte basado
-  en lecturas podía llegar tarde. La implementación actual usa segmentos
-  diagonales temporizados; ver "Movimiento a las marcas".
+  en lecturas podía llegar tarde. Después se probaron teclas simultáneas, pero los
+  desplazamientos físicos no fueron interpolados ni fiables. Una captura de LightBurn
+  reveló el comando nativo a coordenadas que usa ahora Print and Cut; ver
+  "Movimiento a las marcas".
 - **En Calibrar, la cámara en directo y la foto.** Al entrar en la pestaña se ve la
   cámara en directo en el visor, y el botón se llama **Congelar foto**. Con una captura
   ya congelada, el visor ya no se pisa: el botón pasa a guardar.
@@ -416,13 +419,18 @@ cabezal y qué marca elegir de las muchas que hay en la cama) y el frame a panta
 completa que sale al pedir el clic es para **apuntar con precisión**, que a media
 resolución no sirve. Con `--no-watch` se hace por consola, escribiendo el X Y a mano.
 
-## Cómo se mueve el cabezal (y por qué no es el 50200)
+## Jog manual y viaje nativo a coordenadas
 
-**El movimiento va por el teclado del 50207, no por el 50200.** Los paquetes `0x88`
-(movimiento absoluto) y `0x89` (relativo) sueltos por el 50200 se confirman con un
-`c6` y el cabezal **no se mueve**: ese canal sube y ejecuta trabajos `.rd`, y el
-movimiento solo ocurre dentro de un trabajo en curso. Comprobado con la máquina
-parada: `move 50 50` y `jog 3 0` dan `c6` y posición idéntica antes y después.
+**El jog manual usa las teclas del panel 50207.** Los paquetes `0x88` y `0x89`
+sueltos por el 50200 se confirman con un `c6` pero no movieron esta controladora
+en las pruebas previas.
+
+Para un viaje absoluto, la captura de la acción LightBurn **Move > Move to
+Position > Go** muestra `D9 10 00 <X:5 bytes><Y:5 bytes>` por UDP 50200. Tres
+destinos decodificaron exactamente y se confirmó que el cabezal los alcanzó.
+Print and Cut reproduce ese datagrama, recibe el ACK y consulta la posición en
+50207 hasta confirmar llegada. No se han de sustituir esos bytes por `0x88`,
+`0x89` ni por jogs simultáneos.
 
 El 50207 sí mueve, con teclas de jog. Tabla medida en esta máquina, que es la
 opuesta a la documentación:
@@ -435,23 +443,19 @@ opuesta a la documentación:
 | `04` | +Y | `jog 0 2` aumenta Y |
 
 Se manda `A5 50 <tecla>` para pulsar y `A5 51 <tecla>` para soltar.
-La tabla se verificó eje por eje; eso no demuestra por sí solo que una
-pulsación X/Y simultánea produzca movimiento diagonal, que queda pendiente de
-la prueba física descrita arriba.
+La tabla se verificó eje por eje. Una prueba posterior confirmó que mantener
+dos teclas a la vez no da una trayectoria interpolada fiable; no combinar
+teclas para movimiento automático.
 
 ### En la GUI: un toque o mantener
 
 En la app (`ruidavision/`) un **toque corto** de la tecla o del botón da un solo paso
 fino (el del cuadro "paso"), y **mantener** pulsado mueve en continuo con `jog_hold`.
-El movimiento automático a un destino (`move_to`, usado por **Mover** y **Origen 0,0**)
-usa tramos diagonales temporizados, lectura y validación de posición después de cada
-tramo y pulsos limitados para el ajuste final. El jog continuo por eje llegó a
-sobrepasar el destino por un retraso de lectura y se descartó para posicionamiento
-automático. El diagonal simultáneo aún requiere validación física. Cada tarea de
+Print and Cut usa el viaje nativo `D9 10`, no pulsaciones temporizadas. Cada tarea de
 máquina corre en su propio hilo, de modo que mantener una tecla **no congela la ventana**.
 
-El botón **Parar** suelta las cuatro teclas del panel inmediatamente y cancela el
-jog o movimiento automático activo; no sustituye al paro físico de emergencia.
+El botón **Parar** suelta las cuatro teclas del panel y detiene el jog manual. No
+interrumpe el viaje nativo a coordenadas; ante una emergencia usa el paro físico.
 
 El techo de velocidad del continuo es el del perfil de LightBurn (5 mm/s), no algo que
 se ajuste desde la app: `set_param` por red no cambia nada (ver la sección de abajo).
@@ -532,16 +536,9 @@ pulsaciones nuevas.
 
 ### Topes de seguridad
 
-`move_to` no es un lazo libre. Antes de mover comprueba que el destino está dentro
-de `Panel.SAFE` (la caja de recorrido medida: 0..500 × 0..400 mm), rechaza
-lecturas de posición fuera de esa caja, y corta por número de intentos y por
-120 segundos. El plazo permite destinos lejanos: desde (500,400) a (280,216) el
-recorrido por ejes suma unos 404 mm y tarda más de 60 segundos al límite de jog
-de 5 mm/s. Un lazo de movimiento sin estos tres topes acaba pilotando el cabezal
-contra un tope de recorrido, que es exactamente lo que pasó durante el desarrollo.
-En los jog hacia un destino también se comprueba que la posición reportada avanza
-hacia el punto pedido; si un eje se mueve en sentido contrario, el movimiento se
-aborta en vez de seguir hasta el borde.
+`Panel.SAFE` conserva la caja medida (0..500 × 0..400 mm). Los destinos nativos
+se validan en esa caja antes de enviar `D9 10`; el informe 50207 confirma la
+llegada. `Panel.move_to` sigue rechazando destinos por jog temporalizado.
 
 ## Coexistencia con LightBurn / RDWorks
 
