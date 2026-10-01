@@ -54,6 +54,34 @@ def _directorio_datos(congelado, base, localappdata):
 DATOS = _directorio_datos(CONGELADO, BASE, os.environ.get("LOCALAPPDATA"))
 
 
+def _marcas_calibracion_en_area(found, H):
+    """Devuelve todos los candidatos y separa los que la homografia actual
+    proyecta fuera de la caja segura de la maquina."""
+    if H is None:
+        return [(u, v) for u, v, _ in found], []
+    dentro, fuera = hv.marcas_utiles(found, np.array(H, np.float32))
+    pixels = [tuple(map(float, px)) for _, px in dentro + fuera]
+    pixels_fuera = [tuple(map(float, px)) for _, px in fuera]
+    return pixels, pixels_fuera
+
+
+def _detectar_candidatos_calibracion(gray, cfg, thr, min_area):
+    if not 0 <= int(thr) <= 255:
+        raise ValueError("el umbral debe estar entre 0 y 255")
+    min_area = max(40, int(min_area))
+    if min_area > int(cfg["max_area"]):
+        raise ValueError("el area minima no puede superar el area maxima")
+    found = hv.find_marks(
+        gray, min_area=min_area, max_area=cfg["max_area"], thr=int(thr),
+        merge=6, min_circularity=0.55, max_aspect_ratio=1.5)
+    pixels, pixels_fuera = _marcas_calibracion_en_area(found, cfg.get("H"))
+    fuera_mm = []
+    if cfg.get("H"):
+        _, fuera = hv.marcas_utiles(found, np.array(cfg["H"], np.float32))
+        fuera_mm = [(float(mm[0]), float(mm[1])) for mm, _ in fuera]
+    return pixels, pixels_fuera, fuera_mm
+
+
 def _datos():
     """Los datos del usuario, con el calibrado inicial copiado del paquete si
     no hay todavia. La copia la hace el instalador; esto es el respaldo para
@@ -212,15 +240,17 @@ class Foto(tk.Canvas):
         self.al_clic, self.cruz = al_clic, None
         self.foto = None
         self.detectadas = []
+        self.detectadas_fuera = []
         self.esc = 1.0
         self.ox = self.oy = 0
         self.id = None
         self.bind("<Configure>", lambda e: self._dibujar())
         self.bind("<Button-1>", self._clic)
 
-    def poner(self, bgr, detectadas=()):
+    def poner(self, bgr, detectadas=(), detectadas_fuera=()):
         self.foto, self.cruz, self.id = bgr, None, None
         self.detectadas = list(detectadas)
+        self.detectadas_fuera = list(detectadas_fuera)
         self._dibujar()
 
     def _dibujar(self):
@@ -255,18 +285,22 @@ class Foto(tk.Canvas):
         """Lo que ve el detector, dibujado encima de la foto. Sin esto no hay
         manera de saber si una mancha es una marca o ruido antes de clicar."""
         self.delete("marcas")
-        for i, (u, v) in enumerate(self.detectadas, 1):
+        fuera = set(self.detectadas_fuera)
+        todas = self.detectadas + [
+            px for px in self.detectadas_fuera if px not in self.detectadas]
+        for i, (u, v) in enumerate(todas, 1):
             x, y = u * self.esc + self.ox, v * self.esc + self.oy
             r = max(12.0, 8 * self.esc)
+            color = "#ffbf00" if (u, v) in fuera else "#00ff88"
             tags = ("marcas", "marca-%d" % i)
             self.create_oval(x - r, y - r, x + r, y + r,
                              outline="#ffffff", width=5, tags=tags)
             self.create_oval(x - r, y - r, x + r, y + r,
-                             outline="#00ff88", width=3, tags=tags)
+                             outline=color, width=3, tags=tags)
             self.create_line(x - r - 5, y, x + r + 5, y,
-                             fill="#00ff88", width=2, tags=tags)
+                             fill=color, width=2, tags=tags)
             self.create_line(x, y - r - 5, x, y + r + 5,
-                             fill="#00ff88", width=2, tags=tags)
+                             fill=color, width=2, tags=tags)
             self.create_text(x + r + 4, y - r - 2, text=str(i),
                              fill="#ffffff", anchor="sw",
                              font=("Segoe UI", 12, "bold"), tags=tags)
@@ -327,6 +361,10 @@ class App(tk.Tk):
         self._jog_ev = None              # Event del continuo en curso
         self._native_move_active = False
         self._native_move_fault = False
+        self._cal_frame = None
+        self.cal_thr = int(self.cfg.get("thr", 0))
+        self.cal_min_area = max(40, int(self.cfg.get("min_area", 40)))
+        self._jog_step_labels = []
         # Que visores en vivo hay que pintar en cada hoja. Se dibujan solo los de
         # la hoja visible: pintar los de las dos hojas cada 33 ms son seis
         # conversiones de imagen por segundo y frame que no se ven.
@@ -366,6 +404,7 @@ class App(tk.Tk):
                 break
         s.configure(".", font=("Segoe UI", 10))
         s.configure("TButton", padding=(10, 6))
+        s.configure("Jog.TButton", padding=(1, 0), font=("Segoe UI", 8))
         s.configure("Cabeza.TLabel", font=("Segoe UI", 15, "bold"))
         s.configure("Aviso.TLabel", foreground="#b35c00", font=("Segoe UI", 10, "bold"))
         s.configure("Ok.TLabel", foreground="#0a7d33")
@@ -483,7 +522,7 @@ class App(tk.Tk):
                 ("Buscar camaras", self.scan_cams),
         )):
             btn = boton(b, nombre, accion)
-            if nombre == "Origen 0,0" and not ruida.Panel.AUTOMATIC_MOVE_ENABLED:
+            if nombre == "Origen 0,0" and not ruida.NATIVE_POSITION_MOVE_ENABLED:
                 btn.configure(state="disabled")
             if nombre == "Origen 0,0":
                 self.btn_origen = btn
@@ -539,10 +578,38 @@ class App(tk.Tk):
         lab.pack(fill="both", expand=True)
         return lab
 
+    def _controles_jog(self, padre):
+        """Pad compacto compartido por las hojas Calibrar y Print and Cut."""
+        mov = ttk.LabelFrame(padre, text="Jog manual", padding=3)
+        for d, r, c in (("+Y", 0, 1), ("-X", 1, 0),
+                        ("+X", 1, 2), ("-Y", 2, 1)):
+            btn = ttk.Button(mov, text=d, style="Jog.TButton", width=4)
+            btn.bind("<ButtonPress-1>", lambda e, d=d: self._toque(d))
+            btn.bind("<ButtonRelease-1>", lambda e: self._suelta())
+            btn.grid(row=r, column=c, padx=1, pady=1, ipadx=1, ipady=0)
+        pasos = ttk.Frame(mov)
+        pasos.grid(row=1, column=1, padx=1)
+        cal_menos = ttk.Button(pasos, text="−", style="Jog.TButton", width=2,
+                               command=lambda: self._cambia_paso(-1))
+        cal_menos.pack(side="left")
+        etiqueta = ttk.Label(pasos, text="%.1f" % self.paso_mm,
+                             width=4, anchor="center", style="Chico.TLabel")
+        etiqueta.pack(side="left")
+        cal_mas = ttk.Button(pasos, text="+", style="Jog.TButton", width=2,
+                             command=lambda: self._cambia_paso(1))
+        cal_mas.pack(side="left")
+        for widget in (pasos, etiqueta, cal_menos, cal_mas):
+            widget.bind("<MouseWheel>", self._rueda_paso)
+            widget.bind("<Button-4>", self._rueda_paso)
+            widget.bind("<Button-5>", self._rueda_paso)
+        self._jog_step_labels.append(etiqueta)
+        return mov
+
     # -- camaras
     def conectar(self):
-        if self.video:
+        if self.video and self.video.is_alive():
             return
+        self.video = None
         self.lbl_cam.configure(text="camaras: abriendo...")
         self.video = Video(self.cfg, self.log)
         self.video.start()
@@ -589,6 +656,9 @@ class App(tk.Tk):
 
     def _toque(self, d):
         """Boton o tecla pulsados."""
+        if self._native_move_active or self._native_move_fault:
+            self.log("jog bloqueado: hay un viaje nativo activo o sin confirmar")
+            return
         if self._jog_p:                 # se estaba soltando: reengancha
             self.after_cancel(self._jog_p)
             self._jog_p = None
@@ -632,6 +702,10 @@ class App(tk.Tk):
             return                      # soltar Enter no para el jog de W
         if not self._jog_p:
             self._jog_p = self.after(60, self._fin)
+
+    def _jog_en_curso(self):
+        return (self._jog_t is not None or self._jog_p is not None
+                or self._jog_ev is not None)
 
     def _fin(self):
         """Ya no hay tecla pulsada: corta el continuo, o da el paso fino."""
@@ -678,6 +752,17 @@ class App(tk.Tk):
         se ve en la etiqueta, y +- van en saltos de 0.1."""
         self.paso_mm = round(max(hv.PASO_MIN, min(hv.PASO_MAX, mm)), 1)
         self.lbl_paso.configure(text="%.1f mm" % self.paso_mm)
+        for label in self._jog_step_labels:
+            label.configure(text="%.1f" % self.paso_mm)
+
+    def _rueda_paso(self, e):
+        delta = getattr(e, "delta", 0)
+        if delta:
+            cambio = 0.5 if delta > 0 else -0.5
+        else:
+            cambio = 0.5 if getattr(e, "num", None) == 4 else -0.5
+        self._pon_paso(self.paso_mm + cambio)
+        return "break"
 
     def _suelta_tecla(self, e):
         if self._escribiendo():
@@ -723,9 +808,6 @@ class App(tk.Tk):
                                  "No se pudo enviar PARAR:\n\n%s" % e,
                                  parent=self)
 
-    def ir_a(self, x, y):
-        self._tarea(self.maq.get().goto, x, y)
-
     # ------------------------------------------------------ hoja "calibrar"
     def _hoja_calibrar(self):
         self.prompt = ""
@@ -759,6 +841,28 @@ class App(tk.Tk):
         ttk.Label(b, text="  el clic en la foto guarda el punto solo; en la tabla, "
                            "Supr quita el marcado", style="Chico.TLabel").grid(
             row=2, column=0, padx=10, sticky="w", pady=(3, 0))
+
+        controles = ttk.Frame(h)
+        controles.pack(fill="x", pady=(2, 0))
+        self._controles_jog(controles).pack(side="left", padx=(0, 6))
+        boton(controles, "Conectar cámaras", self.conectar).pack(
+            side="left", padx=(0, 8))
+        det = ttk.LabelFrame(controles, text="Detector foto cenital", padding=3)
+        det.pack(side="left", fill="x", expand=True)
+        self.cal_thr_var = tk.StringVar(value=str(self.cal_thr))
+        self.cal_area_var = tk.StringVar(value=str(self.cal_min_area))
+        ttk.Label(det, text="Umbral:").pack(side="left")
+        ttk.Spinbox(det, from_=0, to=255, increment=5, width=5,
+                    textvariable=self.cal_thr_var).pack(side="left", padx=2)
+        ttk.Label(det, text="Area min.:").pack(side="left", padx=(5, 0))
+        ttk.Spinbox(det, from_=40, to=self.cfg["max_area"], increment=10,
+                    width=6, textvariable=self.cal_area_var).pack(
+                        side="left", padx=2)
+        self.btn_cal_apply = boton(det, "Aplicar en foto", self.cal_detector_aplicar)
+        self.btn_cal_apply.configure(state="disabled")
+        self.btn_cal_apply.pack(side="left", padx=3)
+        ttk.Label(det, text="0 = Otsu; no cambia Print and Cut.",
+                  style="Chico.TLabel").pack(side="left", padx=4)
 
         cuerpo = ttk.Frame(h)
         cuerpo.pack(fill="both", expand=True, pady=6)
@@ -809,24 +913,96 @@ class App(tk.Tk):
         """Foto parada de una camara. El hilo de video se para antes (en la UI,
         no aqui dentro: tocar un widget desde el hilo de trabajo parte la app):
         dos VideoCapture sobre el mismo indice se reparten los fotogramas."""
+        if which == "top":
+            try:
+                thr, min_area = self._cal_parametros()
+            except ValueError as e:
+                self.lbl_cal.configure(text=str(e), style="Mal.TLabel")
+                return
+        else:
+            thr, min_area = 0, 40
         self._volvio = bool(self.video)
         self.parar_cams()
+        self._foto_filtrada_area = which == "top" and bool(self.cfg.get("H"))
+        cfg = dict(self.cfg)
 
         def f():
-            cap = hv.open_cam(self.cfg, which)
+            cap = hv.open_cam(cfg, which)
             try:
                 g = hv.grab(cap, n)
                 # Marcas SOLO en la cenital: lo que ve el detector encima de la
                 # foto es lo unico que dice que una mancha es una marca. En la
                 # camara del cabezal no significaria nada.
-                d = (hv.find_marks(g, min_area=self.cfg["min_area"],
-                                   max_area=self.cfg["max_area"],
-                                   thr=self.cfg["thr"], merge=6)
-                     if which == "top" else [])
-                return g, [(u, v) for u, v, _ in d]
+                if which == "top":
+                    pixels, pixels_fuera, fuera_mm = (
+                        _detectar_candidatos_calibracion(
+                            g, cfg, thr, min_area))
+                    if pixels_fuera:
+                        self.log("Calibrar: %d candidatos redondos fuera del area "
+                                 "segura estimada; se muestran en ambar: %s" %
+                                 (len(pixels_fuera), [
+                                     (round(mm[0], 1), round(mm[1], 1))
+                                     for mm in fuera_mm]))
+                    return g, pixels, pixels_fuera, fuera_mm
+                return g, [], [], []
             finally:
                 cap.release()
         return self._tarea(f, al_terminar=self._foto_lista)
+
+    def _cal_parametros(self):
+        try:
+            thr = int(self.cal_thr_var.get())
+            min_area = int(self.cal_area_var.get())
+        except (ValueError, tk.TclError):
+            raise ValueError("umbral y area minima deben ser numeros enteros")
+        if not 0 <= thr <= 255:
+            raise ValueError("el umbral debe estar entre 0 y 255")
+        if not 40 <= min_area <= int(self.cfg["max_area"]):
+            raise ValueError("el area minima debe estar entre 40 y %d px"
+                             % int(self.cfg["max_area"]))
+        return thr, min_area
+
+    def cal_detector_aplicar(self):
+        if self._cal_frame is None:
+            self.lbl_cal.configure(
+                text="Primero congela una foto cenital.", style="Mal.TLabel")
+            return
+        try:
+            thr, min_area = self._cal_parametros()
+        except ValueError as e:
+            self.lbl_cal.configure(text=str(e), style="Mal.TLabel")
+            return
+        self.btn_cal_apply.configure(state="disabled")
+        self._tarea(self._procesa_frame_cal, self._cal_frame.copy(), thr, min_area,
+                    al_terminar=self._cal_aplicada)
+
+    def _procesa_frame_cal(self, frame, thr, min_area):
+        pixels, fuera, fuera_mm = _detectar_candidatos_calibracion(
+            frame, dict(self.cfg), thr, min_area)
+        return pixels, fuera, fuera_mm
+
+    def _cal_aplicada(self, fu):
+        self.btn_cal_apply.configure(state="normal")
+        try:
+            pixels, fuera, fuera_mm = fu.result()
+        except Exception as e:
+            self.lbl_cal.configure(text="No se pudo aplicar la deteccion: %s" % e,
+                                   style="Mal.TLabel")
+            self.log("ERROR al aplicar detector de calibracion: %s" % e)
+            return
+        self.foto.poner(self._cal_frame, pixels, fuera)
+        self._cal_resultado(pixels, fuera)
+        if fuera:
+            self.log("Calibrar: candidatos fuera del area segura estimada: %s"
+                     % [(round(mm[0], 1), round(mm[1], 1))
+                        for mm in fuera_mm])
+
+    def _cal_resultado(self, detectadas, fuera):
+        self.lbl_cal.configure(
+            text=("%s\n%d candidatos redondos; %d fuera del area segura estimada "
+                  "en ambar. El clic se pega al centro cercano."
+                  % (self.prompt, len(detectadas), len(fuera))),
+            style="Chico.TLabel")
 
     def cal_foto(self):
         self.modo = None
@@ -852,21 +1028,41 @@ class App(tk.Tk):
         self._congelar("head")
 
     def _foto_lista(self, fu):
-        g, d = fu.result()
-        if g is not None:
-            self.foto.poner(g, d)
-            # El recuento va debajo del aviso: es la respuesta a "las ha visto o
-            # no". Las de la camara del cabezal no son marcas, asi que ahi solo
-            # se cuentan como referencia de que la foto tiene contraste.
-            self.lbl_cal.configure(
-                text="%s\n%d manchas en verde%s"
-                % (self.prompt, len(d),
-                   "  (el clic se pega al centro de la mas cercana)"
-                   if self.modo != "fov" else "  (informativas, no son marcas)"),
-                style="Chico.TLabel")
-        if self._volvio and not self.video:
-            self.conectar()
-        self.sentido()
+        try:
+            g, detectadas, fuera, fuera_mm = fu.result()
+            if g is not None:
+                self.foto.poner(g, detectadas, fuera)
+                if self.modo == "fov":
+                    self._cal_frame = None
+                    self.btn_cal_apply.configure(state="disabled")
+                    texto = "%s\nFoto de la camara del cabezal." % self.prompt
+                    self.lbl_cal.configure(text=texto, style="Chico.TLabel")
+                else:
+                    self._cal_frame = g.copy()
+                    self.btn_cal_apply.configure(state="normal")
+                    self.lbl_cal.configure(
+                        text="%s\n" % self.prompt, style="Chico.TLabel")
+                    self._cal_resultado(detectadas, fuera)
+                    if fuera:
+                        self.log("Calibrar: candidatos fuera del area segura "
+                                 "estimada: %s" %
+                                 [(round(mm[0], 1), round(mm[1], 1))
+                                  for mm in fuera_mm])
+        except Exception as e:
+            self.lbl_cal.configure(text="No se pudo capturar/procesar la foto: %s"
+                                   % e, style="Mal.TLabel")
+            self.log("ERROR en foto de calibracion: %s" % e)
+        finally:
+            reconectar, self._volvio = self._volvio, False
+            if reconectar:
+                try:
+                    self.conectar()
+                except Exception as e:
+                    self.lbl_cal.configure(
+                        text="Foto terminada, pero no se pudieron reconectar las "
+                             "camaras: %s" % e, style="Mal.TLabel")
+                    self.log("ERROR al reconectar camaras: %s" % e)
+            self.sentido()
 
     def _clic(self, x, y):
         if self.modo == "fov":
@@ -925,7 +1121,9 @@ class App(tk.Tk):
             mm = [p[2:] for _, p in pares]
             H, e_max, e_avg, malos = hv.fit_homography(px, mm)
             if H is None:
-                return "No queda modelo: puntos mas separados y clic en el centro de la mancha."
+                return {"ok": False,
+                        "message": "No queda modelo: separa mas los puntos y "
+                                   "confirma cada posicion/pixel."}
             cfg = hv.load_cfg()
             cfg["H"] = H.tolist()
             # Los que RANSAC rechazo no se guardan: si se guardaran, la
@@ -933,21 +1131,50 @@ class App(tk.Tk):
             cfg["points"] = [[list(px[i]), list(mm[i])]
                              for i in range(len(px)) if i not in malos]
             hv.save_cfg(cfg)
-            return ("Residuo del ajuste: %.3f mm maximo sobre %d puntos, %.3f medio. "
-                    "Homografia guardada (0.1-0.2 mm es normal)."
-                    % (e_max, len(px), e_avg))
+            return {"ok": True, "max_error": e_max, "mean_error": e_avg,
+                    "used": len(px) - len(malos),
+                    "rejected": [i + 1 for i in malos]}
         self._tarea(f, al_terminar=self._ajustado)
 
     def _ajustado(self, fu):
-        r = fu.result()
-        if isinstance(r, str):
+        try:
+            r = fu.result()
+        except Exception as e:
+            detalle = "Error al ajustar la homografia: %s" % e
+            self.lbl_cal.configure(text=detalle, style="Mal.TLabel")
+            self.log(detalle)
+            messagebox.showerror("Error de calibracion", detalle, parent=self)
+            return
+        if isinstance(r, dict) and r.get("ok"):
             self.cfg = hv.load_cfg()
             self.sentido()
-            self.lbl_cal.configure(text=r, style="Ok.TLabel" if not r.startswith("No")
-                                   else "Mal.TLabel")
-        elif r is None:
-            self.lbl_cal.configure(text="fallo al ajustar, mira el registro",
-                                   style="Mal.TLabel")
+            rechazados = r["rejected"]
+            detalle = ("Homografia guardada.\n"
+                       "Puntos usados: %d de %d.\n"
+                       "Error maximo: %.3f mm; medio: %.3f mm."
+                       % (r["used"], len(self.puntos), r["max_error"],
+                          r["mean_error"]))
+            if rechazados:
+                detalle += "\nPuntos descartados por inconsistencia: %s." % (
+                    ", ".join(map(str, rechazados)))
+            self.lbl_cal.configure(text=detalle.replace("\n", " "),
+                                   style="Ok.TLabel")
+            if r["max_error"] > 1.0 or rechazados:
+                detalle += ("\n\nRevisa los puntos descartados y confirma la "
+                            "calibracion antes de usarla para movimientos.")
+                messagebox.showwarning("Calibracion guardada con advertencias",
+                                       detalle, parent=self)
+            else:
+                messagebox.showinfo("Calibracion confirmada", detalle, parent=self)
+        elif isinstance(r, dict):
+            detalle = r.get("message", "No se pudo ajustar la homografia.")
+            self.lbl_cal.configure(text=detalle, style="Mal.TLabel")
+            messagebox.showerror("Calibracion no guardada", detalle, parent=self)
+        else:
+            detalle = "fallo al ajustar, mira el registro"
+            self.lbl_cal.configure(text=detalle, style="Mal.TLabel")
+            self.log(detalle)
+            messagebox.showerror("Calibracion no guardada", detalle, parent=self)
 
     def _retabla(self):
         self.tabla.delete(*self.tabla.get_children())
@@ -1106,6 +1333,7 @@ class App(tk.Tk):
     def _hoja_marcas(self):
         h = ttk.Frame(self.hojas, padding=8)
         self.hojas.add(h, text="  Marcas (Print and Cut)  ")
+        self.i_marcas = self.hojas.index(h)
         x0, y0, x1, y1 = hv.area_trabajo()
         ttk.Label(h, text=(
             "Como va, paso a paso:  1) pon la plantilla en el centro del area de "
@@ -1158,15 +1386,31 @@ class App(tk.Tk):
 
         cuerpo = ttk.Frame(h)
         cuerpo.pack(fill="both", expand=True, pady=6)
+        cuerpo.columnconfigure(0, weight=1)
+        cuerpo.columnconfigure(1, weight=0, minsize=360)
+        cuerpo.rowconfigure(0, weight=1)
         self.foto_marcas = Foto(cuerpo)
-        self.foto_marcas.pack(side="left", fill="both", expand=True)
-        self.lst = tk.Listbox(cuerpo, font=("Consolas", 11), height=20, bg="#101418",
-                              fg="#cfd8dc", activestyle="none", width=34)
-        self.lst.pack(side="left", fill="y", padx=(6, 0))
+        self.foto_marcas.grid(row=0, column=0, sticky="nsew")
+        panel_lateral = ttk.Frame(cuerpo, width=360)
+        panel_lateral.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        panel_lateral.grid_propagate(False)
+        panel_lateral.columnconfigure(0, weight=1)
+        panel_lateral.rowconfigure(0, weight=4)
+        panel_lateral.rowconfigure(2, weight=1)
+        self.im_marcas_head = self._marco(
+            panel_lateral, "CABEZAL (en vivo)", alto=6, celda=(0, 0))
+        self.im_marcas_head.master.grid_configure(
+            sticky="nsew", pady=(0, 4))
+        self.vivos[self.i_marcas] = (None, self.im_marcas_head)
+        self._controles_jog(panel_lateral).grid(
+            row=1, column=0, sticky="ew", pady=(0, 4))
+        self.lst = tk.Listbox(panel_lateral, font=("Consolas", 10), height=3,
+                              bg="#101418", fg="#cfd8dc", activestyle="none")
+        self.lst.grid(row=2, column=0, sticky="nsew")
         self.lst.bind("<<ListboxSelect>>", self._copia_una)
-        ttk.Label(h, text="A la izquierda, lo que ha visto el detector: la foto de la "
-                          "cama con las DOS marcas en verde. A la derecha, las "
-                          "coordenadas en mm. Clic en una linea = copiarla sola.",
+        ttk.Label(h, text="La foto muestra la deteccion; a la derecha estan el visor "
+                          "del cabezal, el jog manual y las coordenadas. Clic en "
+                          "una coordenada = copiarla.",
                   style="Chico.TLabel", wraplength=980, justify="left").pack(anchor="w")
         ttk.Label(h, text="El centrado automatico de los dos puntos en una sola tarea "
                           "sigue deshabilitado; usa Mover 1 y Mover 2 por separado.",
@@ -1239,6 +1483,9 @@ class App(tk.Tk):
                 text="Movimiento no confirmado: verifica que el cabezal se "
                      "detuvo y reinicia la app antes de otra prueba.")
             return
+        if self._native_move_active:
+            self.btn_mover.configure(text="Viaje en curso...", state="disabled")
+            return
         if not self.marcas2:
             self.btn_mover.configure(text="Mover", state="disabled")
             return
@@ -1252,10 +1499,20 @@ class App(tk.Tk):
             text="Mover %d" % (i + 1) if i < len(self.marcas2) else "Mover",
             state="normal")
 
+    def _boton_origen(self):
+        if not ruida.NATIVE_POSITION_MOVE_ENABLED or self._native_move_fault:
+            self.btn_origen.configure(state="disabled")
+        else:
+            self.btn_origen.configure(
+                state="disabled" if self._native_move_active else "normal")
+
     def mover_marca(self):
         """Pasos 3 y 4: llevar el cabezal al punto 1 y luego al punto 2."""
         if self._native_move_fault:
             self.log("Mover bloqueado: primero verifica la posicion fisica")
+            return
+        if self._jog_en_curso():
+            self.log("Mover bloqueado: suelta primero el control de jog")
             return
         if not ruida.NATIVE_POSITION_MOVE_ENABLED:
             self.log("Mover ignorado: viaje nativo a coordenadas deshabilitado")
@@ -1269,11 +1526,11 @@ class App(tk.Tk):
             return
         mm = self.marcas2[i]
         self._native_move_active = True
+        self._boton_origen()
         self.btn_mover.configure(text="Moviendo %d..." % (i + 1), state="disabled")
         self.lbl_marcas.configure(text="moviendo al punto %d..." % (i + 1),
                                   style="Chico.TLabel")
         self.log("marcando punto %d: %.3f, %.3f mm" % (i + 1, mm[0], mm[1]))
-        self._suelta()                   # un Mover con el jog vivo seria raro
         # _tarea solo pasa el future a al_terminar, asi que el position va dentro
         self._tarea(self._marca_a, mm, i,
                     al_terminar=lambda fu: self._fin_movimiento(i, fu))
@@ -1290,6 +1547,7 @@ class App(tk.Tk):
             self.lbl_punto.configure(text="PUNTO %d: MOVIMIENTO CANCELADO"
                                       % (i + 1), foreground="#8b1a1a")
             self._boton_mover()
+            self._boton_origen()
             messagebox.showerror(
                 "Movimiento no confirmado",
                 "%s\n\nEl viaje nativo no se puede cancelar desde la app. "
@@ -1317,6 +1575,57 @@ class App(tk.Tk):
         self.log("punto alcanzado: %.3f, %.3f mm" % (pos[0], pos[1]))
         return pos
 
+    def _ir_origen_nativo(self):
+        maquina = self.maq.get()
+        if maquina is None:
+            raise RuntimeError("no se pudo abrir el panel de la Ruida")
+        pos = maquina.goto_native(0.0, 0.0)
+        if not _posicion_valida(pos) or float(np.hypot(*pos)) > 0.5:
+            raise RuntimeError("el viaje al origen no se confirmo: %s" % (pos,))
+        return pos
+
+    def ir_a(self, x, y):
+        if (x, y) != (0.0, 0.0):
+            self.log("Origen 0,0: destino no permitido por este control")
+            return
+        if not ruida.NATIVE_POSITION_MOVE_ENABLED:
+            self.log("Origen 0,0: viaje nativo deshabilitado")
+            return
+        if self._native_move_active or self._native_move_fault:
+            self.log("Origen 0,0 bloqueado: hay un viaje activo o sin confirmar")
+            return
+        if self._jog_en_curso():
+            self.log("Origen 0,0 bloqueado: suelta primero el control de jog")
+            return
+        self._native_move_active = True
+        self._boton_origen()
+        self._boton_mover()
+        self.log("viaje nativo al origen 0.000, 0.000 mm (no cancelable desde la app)")
+        self._tarea(self._ir_origen_nativo, al_terminar=self._fin_origen)
+
+    def _fin_origen(self, fu):
+        self._native_move_active = False
+        try:
+            pos = fu.result()
+        except Exception as e:
+            self._native_move_fault = True
+            detalle = "ERROR al mover al origen: %s" % e
+            self.log(detalle)
+            self.lbl_pos.configure(text=detalle)
+            self._boton_origen()
+            self._boton_mover()
+            messagebox.showerror(
+                "Origen no confirmado",
+                "%s\n\nEl viaje nativo no se puede cancelar desde la app. "
+                "Verifica la posicion fisica antes de volver a mover." % detalle,
+                parent=self)
+            return
+        self.pos, self._ok = pos, True
+        self.lbl_pos.configure(text="origen confirmado: X = %.3f  Y = %.3f mm" % pos)
+        self.log("origen confirmado: %.3f, %.3f mm" % pos)
+        self._boton_origen()
+        self._boton_mover()
+
     def _fin_punto(self, i, pos):
         """Ya esta el cabezal en el punto: se enseña la posicion para copiarla
         a LightBurn con un dedo, no con el portapapeles."""
@@ -1329,6 +1638,7 @@ class App(tk.Tk):
             return
         self.i_marca = i + 1
         self._boton_mover()
+        self._boton_origen()
         x, y = (pos[0] + ox, pos[1] + oy) if i == 0 else (pos[0], pos[1])
         self.lbl_punto.configure(text="PUNTO %d:    X = %.3f     Y = %.3f mm"
                                   % (i + 1, x, y), foreground="#0a7d33")
@@ -1341,6 +1651,7 @@ class App(tk.Tk):
                   "ya esta calculado aqui y con offset activado se cuenta dos veces.")
 
     def _run(self, fn, ns):
+        self._volvio = bool(self.video)
         if self.video:
             self.log("se desconectan las camaras: el calculo abre las suyas")
         self.parar_cams()
@@ -1353,15 +1664,14 @@ class App(tk.Tk):
             self.maq.cerrar()
         self.lst.delete(0, "end")
         self.coords = []
-        self._volvio = bool(self.video)
         self._tarea(fn, ns, al_terminar=self._fin_marcas)
 
     def _elige_marcas(self, found):
         """Las manchas que valen, en mm, y un aviso si no son las pedidas.
 
         El criterio es el de hybrid_vision, no uno proprio: fuera del area de
-        trabajo se descarta ANTES de elegir la pareja mas separada, que si no
-        se lleva el tag de calibracion en vez de la marca del material. Los px
+        trabajo se descarta ANTES de elegir la pareja con los componentes mas
+        grandes, para que un reflejo pequeno no gane por estar mas lejos. Los px
         que se pintan se dejan en `self.marcas_utiles` para el lienzo."""
         H = self.cfg.get("H")
         n = int(self.v_marcas.get() or 2)
@@ -1377,7 +1687,7 @@ class App(tk.Tk):
         if len(dentro) >= n:
             # pick_pair devuelve la PAREJA (a, b), no una marca: envolverlo en
             # lista dejaba una tupla dentro y al desempaquetar petaba.
-            elegidas = list(hv.pick_pair(dentro)) if n == 2 else dentro[:n]
+            elegidas = list(hv.pick_pair(dentro, found)) if n == 2 else dentro[:n]
             self.marcas_utiles = [p for _, p in elegidas]
             return [mm for mm, _ in elegidas], (
                 "%d manchas fuera del area de trabajo: descartadas" % len(fuera)
@@ -1537,8 +1847,10 @@ class App(tk.Tk):
                 if top is not None and head is not None:
                     vis = self.vivos.get(self.hojas.index("current"))
                     if vis:
-                        self._foto(vis[0], self._con_top(top))
-                        self._foto(vis[1], self._con_head(head))
+                        if vis[0] is not None:
+                            self._foto(vis[0], self._con_top(top))
+                        if vis[1] is not None:
+                            self._foto(vis[1], self._con_head(head))
                     self._cada_paso()
         self.after(33, self._pintar)
 
@@ -1578,9 +1890,12 @@ class App(tk.Tk):
         im = cv2.cvtColor(gris, cv2.COLOR_GRAY2BGR)
         h, w = im.shape[:2]
         x0, y0, x1, y1 = hv.center_roi(w, h)
-        cv2.rectangle(im, (x0, y0), (x1, y1), (0, 200, 0), 1)
-        cv2.line(im, (w // 2 - 22, h // 2), (w // 2 + 22, h // 2), (0, 200, 0), 1)
-        cv2.line(im, (w // 2, h // 2 - 22), (w // 2, h // 2 + 22), (0, 200, 0), 1)
+        cv2.rectangle(im, (x0, y0), (x1, y1), (0, 220, 0), 2)
+        cv2.line(im, (w // 2 - 36, h // 2), (w // 2 + 36, h // 2),
+                 (0, 255, 0), 2)
+        cv2.line(im, (w // 2, h // 2 - 36), (w // 2, h // 2 + 36),
+                 (0, 255, 0), 2)
+        cv2.circle(im, (w // 2, h // 2), 7, (0, 255, 255), 2)
         return im
 
     def _cada_paso(self):

@@ -151,6 +151,17 @@ def main():
     chk("el registro recibe lineas", app.txt.get("1.0", "end").strip() != "")
     chk("la app mira las actualizaciones al arrancar, sin pulsar nada",
         "sin novedades" in app.lbl_ota.cget("text"))
+    reconexiones = []
+    conectar_real = app.conectar
+    app.conectar = lambda: reconexiones.append(True)
+    app.video = None
+    app._volvio = True
+    app._foto_lista(SimpleNamespace(
+        result=lambda: (_ for _ in ()).throw(RuntimeError("captura simulada fallida"))))
+    app.conectar = conectar_real
+    chk("una captura fallida informa el error y reconecta las camaras",
+        reconexiones == [True] and not app._volvio
+        and "captura simulada fallida" in app.lbl_cal.cget("text"))
 
     # Dibujado de las dos camaras con imagen falsa: homografia, caja de viaje,
     # cruz del cabezal y el texto de SIN HOMOGRAFIA.
@@ -192,6 +203,24 @@ def main():
     f.detectadas = [(x + 12.0, y), (300.0, 900.0)]
     chk("el clic se pega al centro de la marca cercana", f.snap(x + 9, y + 3) == (x + 12.0, y))
     chk("un clic lejos de toda marca se queda donde esta", f.snap(20.0, 20.0) == (20.0, 20.0))
+    pixels, outside = A._marcas_calibracion_en_area(
+        [(100.0, 100.0, 500), (-1.0, 100.0, 400)],
+        np.eye(3, dtype=np.float32))
+    chk("calibracion conserva y separa candidatos fuera del area segura",
+        pixels == [(100.0, 100.0), (-1.0, 100.0)]
+        and outside == [(-1.0, 100.0)])
+    import cv2
+    test_frame = np.full((200, 200), 250, np.uint8)
+    cv2.circle(test_frame, (50, 50), 8, 0, -1)
+    cv2.circle(test_frame, (120, 120), 14, 0, -1)
+    detector_cfg = dict(app.cfg, H=np.eye(3, dtype=np.float32).tolist(),
+                        max_area=2000)
+    encontrados_bajos, _, _ = A._detectar_candidatos_calibracion(
+        test_frame, detector_cfg, 0, 40)
+    encontrados_altos, _, _ = A._detectar_candidatos_calibracion(
+        test_frame, detector_cfg, 0, 400)
+    chk("los parametros de umbral y area minima ajustan solo el detector de calibracion",
+        len(encontrados_bajos) == 2 and len(encontrados_altos) == 1)
 
     # El sentido de WASD sale de la homografia real, no de una tabla a mano.
     mapa = A.hv._mapa_wasd(cfg, app.cal_res)
@@ -310,6 +339,37 @@ def main():
     app.cal_ajusta()                                      # numeros sueltos: no ajusta
     chk("no se ajusta con numeros que no son 1,2,3...",
         "Renumerar" in app.lbl_cal.cget("text"))
+    dialogs = []
+    showinfo_real, showwarning_real, showerror_real = (
+        A.messagebox.showinfo, A.messagebox.showwarning, A.messagebox.showerror)
+    A.messagebox.showinfo = lambda *a, **k: dialogs.append(("info", a))
+    A.messagebox.showwarning = lambda *a, **k: dialogs.append(("warning", a))
+    A.messagebox.showerror = lambda *a, **k: dialogs.append(("error", a))
+    try:
+        app._ajustado(SimpleNamespace(result=lambda: {
+            "ok": True, "max_error": 0.2, "mean_error": 0.1,
+            "used": 4, "rejected": []}))
+        chk("Ajustar H confirma en un aviso que guardo la homografia",
+            dialogs[-1][0] == "info"
+            and "Homografia guardada" in dialogs[-1][1][1])
+        app._ajustado(SimpleNamespace(result=lambda: {
+            "ok": True, "max_error": 1.2, "mean_error": 0.8,
+            "used": 3, "rejected": [4]}))
+        chk("Ajustar H advierte si hay puntos descartados o error alto",
+            dialogs[-1][0] == "warning"
+            and "Puntos descartados" in dialogs[-1][1][1])
+
+        def ajuste_fallido():
+            raise RuntimeError("fallo simulado al ajustar")
+
+        app._ajustado(SimpleNamespace(result=ajuste_fallido))
+        chk("Ajustar H muestra un aviso si falla la tarea",
+            dialogs[-1][0] == "error"
+            and "fallo simulado al ajustar" in dialogs[-1][1][1])
+    finally:
+        A.messagebox.showinfo = showinfo_real
+        A.messagebox.showwarning = showwarning_real
+        A.messagebox.showerror = showerror_real
     A.simpledialog.askinteger = lambda *a, **k: 1
     app.cal_reordena()
     chk("renumerar ordena por numero y deja 1,2,3...",
@@ -343,6 +403,15 @@ def main():
     un_frame()
     chk("solo se pinta la hoja que se ve",
         antes == [getattr(l, "img", None) for l in app.vivos[app.i_vivo]])
+    app.hojas.select(app.i_marcas)
+    un_frame()
+    chk("Print and Cut muestra el visor en vivo del cabezal (%d x %d, image=%s)"
+        % (app.im_marcas_head.winfo_width(), app.im_marcas_head.winfo_height(),
+           getattr(app.im_marcas_head, "img", None) is not None),
+        app.vivos[app.i_marcas][0] is None
+        and getattr(app.im_marcas_head, "img", None) is not None
+        and app.im_marcas_head.winfo_width() >= 320
+        and app.im_marcas_head.winfo_height() >= 130)
     # El reparto de los cuatro: los dos visores en vivo, la foto congelada y la
     # tabla de puntos. Medianamente era un PanedWindow con la izquierda al 75% y
     # la foto encima de las camaras, y el reparto salia como salia. Ahora es
@@ -360,7 +429,7 @@ def main():
     # ilegible, no el pixel exacto.
     chk("los cuatro elementos de Calibrar miden lo mismo %s" % (celdas,),
         anchos[-1] - anchos[0] <= 1 and altos[-1] - altos[0] <= 1
-        and min(anchos[0], altos[0]) > 120)
+        and min(anchos[0], altos[0]) > 210)
 
     # Los botones llevan su nombre encima, no un icono. Se probaron los iconos
     # con tooltip y estorbaban: con la ventana estrecha habia que adivinar.
@@ -373,6 +442,14 @@ def main():
     cosas = todos(app)
     bts = [w for w in cosas if w.winfo_class() == "TButton"]
     nombres = [w.cget("text") for w in bts]
+    chk("Print and Cut dispone del jog manual compacto",
+        all(nombres.count(name) >= 3 for name in ("+Y", "+X", "-Y", "-X")))
+    jog_buttons = [w for w in bts if w.cget("style") == "Jog.TButton"]
+    jog_tamanos = [(w.cget("text"), w.winfo_width(), w.winfo_height())
+                    for w in jog_buttons]
+    chk("los botones de jog son compactos %s" % ascii(jog_tamanos),
+        len(jog_buttons) >= 10 and max(w.winfo_width() for w in jog_buttons) < 55
+        and max(w.winfo_height() for w in jog_buttons) < 30)
     Iconos = set("⌂◉○⏹⊕◫⧉▤⟳◎➜▶▲▼◀✓⌦✕⇅# ")
     chk("los botones llevan el nombre, no un icono",
         len(bts) >= 20 and not hasattr(A, "ToolTip")
@@ -386,13 +463,18 @@ def main():
     # puede existir en ninguna hoja.
     chk("Estacionar ya no es un boton suelto (Vivo usa Origen 0,0)",
         "Estacionar" not in nombres and "Origen 0,0" in nombres)
-    chk("Origen 0,0 y Estacionar siguen deshabilitados en la prueba Print and Cut",
-        "disabled" in str(app.btn_origen.state())
+    chk("Origen 0,0 usa el viaje nativo habilitado y Estacionar sigue deshabilitado",
+        "disabled" not in str(app.btn_origen.state())
         and "disabled" in str(app.btn_cal_park.state()))
+    chk("Calibrar ofrece jog direccional, reconexion y ajuste de deteccion",
+        all(name in nombres for name in ("Conectar cámaras", "+Y", "-X", "+X", "-Y",
+                                          "Aplicar en foto")))
     chk("el boton de buscar actualizaciones ya no existe",
         "Buscar actualizaciones" not in nombres)
     chk("los botones de mover dicen el eje (+Y, +X, -Y, -X)",
-        [t for t in nombres if t in ("+Y", "+X", "-Y", "-X")] == ["+Y", "+X", "-Y", "-X"])
+        [t for t in nombres if t in ("+Y", "+X", "-Y", "-X")][:4]
+        == ["+Y", "+X", "-Y", "-X"]
+        and all(nombres.count(t) >= 3 for t in ("+Y", "+X", "-Y", "-X")))
     app._boton_mover()
     chk("Mover avisa de que no hay puntos", app.btn_mover.cget("text") == "Mover"
         and "disabled" in str(app.btn_mover.state()))
@@ -400,29 +482,33 @@ def main():
     # Ningun boton puede quedar fuera de la ventana: con los iconos cabia todo,
     # y al volver a los nombres los ultimos se salian sin verse. Se mide de
     # verdad, con la ventana ya colocada.
-    app.hojas.select(0)
-    app.update()
-    app.geometry("1200x780")
-    app.update()
     chopped = {}
     medidos = 0
-    for pos in range(len(app.hojas.tabs())):
-        app.hojas.select(pos)
+    for width in (1200, 940):
+        app.geometry("%dx780" % width)
         app.update()
-        for w in todos(app):
-            if w.winfo_class() != "TButton" or not w.winfo_ismapped():
-                continue
-            medidos += 1
-            if w.winfo_rootx() - app.winfo_rootx() + w.winfo_width() > app.winfo_width():
-                chopped.setdefault(app.hojas.tab(pos, "text").strip(), []).append(
-                    w.cget("text"))
-    chk("ningun boton se sale de la ventana de 1200 px (%d mirados, fuera: %s)"
-        % (medidos, chopped or "ninguno"), not chopped and medidos >= 20)
+        for pos in range(len(app.hojas.tabs())):
+            app.hojas.select(pos)
+            app.update()
+            for w in todos(app):
+                if w.winfo_class() != "TButton" or not w.winfo_ismapped():
+                    continue
+                medidos += 1
+                if w.winfo_rootx() - app.winfo_rootx() + w.winfo_width() > app.winfo_width():
+                    chopped.setdefault(
+                        "%d px %s" % (width, app.hojas.tab(pos, "text").strip()),
+                        []).append(w.cget("text"))
+    chk("ningun boton se sale de ventanas de 1200/940 px (%d mirados, fuera: %s, ventana %d)"
+        % (medidos, chopped or "ninguno", app.winfo_width()),
+        not chopped and medidos >= 40)
+    app.geometry("1200x780")
+    app.update()
 
     # - y + eligen el paso de toque sin soltar el WASD, en saltos de 0.1 mm.
     chk("el paso de toque es un numero, no un desplegable",
         app.paso_mm == 0.5 and "0.5 mm" in app.lbl_paso.cget("text")
-        and not hasattr(app, "cmb"))
+        and not hasattr(app, "cmb")
+        and all("0.5" in label.cget("text") for label in app._jog_step_labels))
     app._cambia_paso(-1)
     chk("- baja el paso de 0.1", app.paso_mm == 0.4)
     app._cambia_paso(2)
@@ -433,6 +519,14 @@ def main():
     app._cambia_paso(-99)
     chk("el paso no se sale del tope de abajo",
         app.paso_mm == A.hv.PASO_MIN)
+    app._pon_paso(1.0)
+    app._rueda_paso(SimpleNamespace(delta=120, num=None))
+    chk("la rueda incrementa rapidamente el paso en 0.5 mm",
+        app.paso_mm == 1.5 and all(
+            "1.5" in label.cget("text") for label in app._jog_step_labels))
+    app._rueda_paso(SimpleNamespace(delta=0, num=5))
+    chk("la rueda tambien reduce el paso en 0.5 mm",
+        app.paso_mm == 1.0)
     app._pon_paso(0.5)
     app.hojas.select(app.i_vivo)
 
@@ -499,7 +593,7 @@ def main():
     fake = [(1.5, 2.5), (61.0, 41.0)]
     # H identidad: px == mm, y asi las cifras del test son las que se ven.
     app.cfg["H"] = np.eye(3, dtype=np.float32).tolist()
-    found = [(1.5, 2.5, 900), (61.0, 41.0, 800),
+    found = [(1.5, 2.5, 900), (61.0, 41.0, 800), (3.0, 3.0, 80),
              (600, 900, 700), (30, 30, 600)]
     app._tarea = lambda fn, *a, **kw: fn(*a)
     app._ok = True
@@ -516,6 +610,8 @@ def main():
     app.maq = SimpleNamespace(get=lambda: maquina_falsa)
     marcas, aviso = app._elige_marcas(found)
     chk("solo se quedan las manchas dentro del area de trabajo", len(marcas) == 2)
+    chk("elige los dos componentes grandes y no el reflejo lejano",
+        marcas == [tuple(found[0][:2]), tuple(found[1][:2])])
     chk("las de fuera se dicen, no se esconden",
         aviso != "" and "fuera" in aviso.lower())
     app.marcas2 = marcas
@@ -538,6 +634,26 @@ def main():
         return future
 
     app._tarea = tarea_inline
+    origenes = []
+    goto_nativo_anterior = maquina_falsa.goto_native
+    maquina_falsa.goto_native = lambda x, y: (
+        origenes.append((x, y)) or (0.0, 0.0))
+    app._native_move_fault = False
+    app.ir_a(0.0, 0.0)
+    chk("Origen 0,0 envia el movimiento nativo y confirma llegada",
+        origenes == [(0.0, 0.0)] and app._ok
+        and "origen confirmado" in app.lbl_pos.cget("text"))
+    origen_error = RuntimeError("confirmacion de origen simulada")
+    showerror_origen = A.messagebox.showerror
+    A.messagebox.showerror = lambda *a, **k: None
+    app._fin_origen(SimpleNamespace(
+        result=lambda: (_ for _ in ()).throw(origen_error)))
+    A.messagebox.showerror = showerror_origen
+    chk("Origen sin confirmacion bloquea viajes posteriores",
+        app._native_move_fault and "disabled" in str(app.btn_origen.state()))
+    app._native_move_fault = False
+    app._boton_origen()
+    maquina_falsa.goto_native = goto_nativo_anterior
     app.mover_marca()
     chk("Mover 1 envia el primer destino nativo y avanza el flujo",
         movimientos == [tuple(marcas[0])] and app.i_marca == 1
@@ -546,6 +662,16 @@ def main():
     chk("Mover 2 envia el segundo destino nativo",
         movimientos == [tuple(marcas[0]), tuple(marcas[1])]
         and app.i_marca == 2)
+    app.cfg["cam_offset_mm"] = [-49.132, 1.438]
+    app._fin_punto(0, (390.638, 312.232))
+    chk("el punto 1 mantiene la conversion de offset previa",
+        "X = 341.506" in app.lbl_punto.cget("text")
+        and "Y = 313.670" in app.lbl_punto.cget("text"))
+    app._fin_punto(1, (312.730, 312.436))
+    chk("el punto 2 mantiene la lectura directa previa",
+        "X = 312.730" in app.lbl_punto.cget("text")
+        and "Y = 312.436" in app.lbl_punto.cget("text"))
+    app.cfg["cam_offset_mm"] = [0.0, 0.0]
     avisos = []
     showwarning_real = A.messagebox.showwarning
     A.messagebox.showwarning = lambda *a, **k: avisos.append(a)
@@ -627,6 +753,8 @@ def main():
     pan = PanFalso()
     app.maq.get = lambda: type("M", (), {"pan": pan})()
     app.video = VideoFalso(app.cfg, app.log)
+    app._native_move_fault = False
+    app._native_move_active = False
     app._tarea = lambda fn, *a, **kw: fn(*a)
     for attr in ("_jog_d", "_jog_t", "_jog_p", "_jog_ev"):
         setattr(app, attr, None)

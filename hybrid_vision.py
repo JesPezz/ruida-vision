@@ -142,9 +142,10 @@ def read_gris(cap):
 # ---------------------------------------------------------------- deteccion
 
 def find_marks(gray, roi=None, min_area=8, max_area=40000, thr=0, merge=1,
-               show=False):
+               show=False, min_circularity=0.0, max_aspect_ratio=float("inf")):
     """Marcas de registro: componentes oscuros de area plausible, centro
-    subpixel por momentos. Sirve para puntos y para cruces.
+    subpixel por momentos. `min_circularity` permite excluir textura, reflejos
+    y bordes cuando la vista solo debe resaltar marcas redondas.
 
     `merge` agrupa en una sola marca las detecciones cuyos centroides caen en el
     mismo pixel. El tag de LightBurn es un aro con la cruz dentro, y sin esto son
@@ -166,7 +167,23 @@ def find_marks(gray, roi=None, min_area=8, max_area=40000, thr=0, merge=1,
         if a < min_area or a > max_area:
             continue
         x, y, w, h = stats[i, :4]
-        m = cv2.moments((lab[y:y + h, x:x + w] == i).astype(np.uint8))
+        aspect_ratio = max(w, h) / max(1, min(w, h))
+        if aspect_ratio > max_aspect_ratio:
+            continue
+        component = (lab[y:y + h, x:x + w] == i).astype(np.uint8)
+        if min_circularity:
+            contours, _ = cv2.findContours(
+                component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not contours:
+                continue
+            contour = max(contours, key=cv2.contourArea)
+            perimeter = cv2.arcLength(contour, True)
+            if perimeter <= 0:
+                continue
+            circularity = 4.0 * math.pi * cv2.contourArea(contour) / perimeter ** 2
+            if circularity < min_circularity:
+                continue
+        m = cv2.moments(component)
         if m["m00"] <= 0:
             continue
         out.append((x0 + x + m["m10"] / m["m00"],
@@ -723,10 +740,26 @@ def cmd_fov(a):
         cap.release()
 
 
-def pick_pair(marks):
-    """La pareja de marcas mas separada: la mas estable frente al ruido."""
-    return max(itertools.combinations(marks, 2),
-               key=lambda p: math.dist(p[0][0], p[1][0]))
+def pick_pair(marks, found=None):
+    """Elige dos marcas, priorizando el area de sus componentes detectados.
+
+    Una mancha pequeña puede caer dentro del area segura por un reflejo y, si
+    se elige solo por distancia, reemplazar una marca real. La distancia queda
+    como desempate; sin `found` se conserva el criterio anterior.
+    """
+    pairs = itertools.combinations(marks, 2)
+    if found is None:
+        return max(pairs, key=lambda p: math.dist(p[0][0], p[1][0]))
+    area_by_px = {(u, v): area for u, v, area in found}
+
+    def score(pair):
+        try:
+            areas = [area_by_px[mark[1]] for mark in pair]
+        except KeyError as e:
+            raise ValueError("no se encontro el area de una marca detectada") from e
+        return min(areas), sum(areas), math.dist(pair[0][0], pair[1][0])
+
+    return max(pairs, key=score)
 
 
 def area_trabajo():
@@ -820,7 +853,14 @@ def cmd_run(a):
                      "repartidos por TODA la cama, esquinas incluidas."
                      % (roi_mm, len(marks), marks_wanted))
         if marks_wanted == 2:
-            a_, b_ = pick_pair(marks)
+            a_, b_ = pick_pair(marks, found)
+            extras = [mark for mark in marks if mark not in (a_, b_)]
+            if extras:
+                area_by_px = {(u, v): area for u, v, area in found}
+                print("candidatas adicionales dentro del area segura, "
+                      "descartadas al elegir por tamano: %s"
+                      % [(tuple(round(q, 1) for q in mark[1]),
+                          area_by_px[mark[1]]) for mark in extras])
             marks = [a_, b_]
         else:
             marks = marks[:marks_wanted]
@@ -1278,6 +1318,15 @@ def cmd_test(a):
         cv2.circle(g, (cx, 200), 20, 0, 2, cv2.LINE_AA)
     assert len(find_marks(g, merge=6)) == 2
     print("tag aro+cruz: OK (1 marca a cualquier radio, 2 tags separados = 2)")
+    # En la vista de calibracion, los candidatos circulares evitan iluminar
+    # bordes y reflejos alargados que el umbral global ve como componentes.
+    g = np.full((300, 500), 255, np.uint8)
+    for cx in (120, 260):
+        cv2.circle(g, (cx, 150), 12, 0, -1)
+    cv2.ellipse(g, (420, 40), (35, 12), 0, 0, 360, 0, -1)
+    assert len(find_marks(g, min_area=40, min_circularity=0.55,
+                          max_aspect_ratio=1.5)) == 2
+    print("filtro calibracion: OK (conserva discos y descarta reflejo alargado)")
     # el driver dio 1280x720 y no lo que pedimos: la ROI tiene que caber igual
     for w, h in ((1920, 1080), (1280, 720), (640, 480), (320, 240)):
         x0, y0, x1, y1 = center_roi(w, h)
@@ -1308,6 +1357,15 @@ def cmd_test(a):
     d2, f2 = marcas_utiles([(0, 0, 900), (4000, 0, 800)], T, (0, 0, 10, 10))
     assert not d2 and len(f2) == 2, (d2, f2)
     print("marcas_utiles: OK (la caja descarta el tag de fuera; el ROI manda)")
+    # Una mota puede proyectarse dentro del area segura y ser mas lejana que
+    # las dos marcas reales. La pareja se decide por el tamano de componente,
+    # usando la distancia solo para desempatar.
+    candidatas = [(px_to_mm(T, (u, v)), (u, v))
+                  for u, v, _ in ((0, 0, 900), (100, 0, 800), (1000, 0, 60))]
+    elegidas = pick_pair(candidatas, [(0, 0, 900), (100, 0, 800),
+                                      (1000, 0, 60)])
+    assert [p[1] for p in elegidas] == [(0, 0), (100, 0)], elegidas
+    print("seleccion de pareja: OK (ignora mota pequena aunque este mas lejos)")
 
     # El paso se pide en mm y sale en ms: los tres puntos medidos, el recorte a
     # 0.1-10 mm y el minimo de 1 ms (por debajo la Ruida no distingue el pulso).

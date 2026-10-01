@@ -35,8 +35,9 @@ calibración primero.
   LightBurn antes de usar Ruida Vision porque ambas aplicaciones necesitan el
   puerto local 40200.
 - Los destinos están limitados a la caja medida de 0..500 × 0..400 mm.
-  `Origen 0,0`, `Estacionar` y **Detectar y centrar los 2** siguen
-  intencionalmente deshabilitados. Print and Cut avanza un punto por pulsación.
+  `Origen 0,0` usa ahora el viaje nativo de destino fijo y confirma llegada;
+  `Estacionar` en Calibrar y **Detectar y centrar los 2** siguen deshabilitados.
+  Print and Cut avanza un punto por pulsación.
 
 ## Próximo trabajo
 
@@ -52,6 +53,114 @@ calibración primero.
 5. Solo después de resolver la detección/calibración, probar Mover 1 y Mover 2
    separadamente, con láser deshabilitado y recorrido despejado. No relajar
    `Panel.SAFE` para ocultar detecciones fuera de cama.
+
+## Diagnóstico offline del selector (30 de septiembre)
+
+- Se analizó el `bed.png` y el `calib.json` activos en `%LOCALAPPDATA%\Ruida
+  Vision`, sin abrir cámaras ni mover la máquina. La homografía activa reproyecta
+  sus seis puntos con error medio de 0.082 mm y máximo de 0.202 mm.
+- En esa imagen, dos discos de las marcas tienen componentes de 493 y 483 px;
+  además aparece una mancha/reflejo de 61 px que la homografía coloca dentro de
+  la caja segura. El selector anterior elegía el par más separado, por lo que
+  podía sustituir una marca por ese reflejo.
+- `pick_pair` ahora prioriza el área de componente de las dos marcas dentro del
+  área segura y usa la distancia como desempate. Se conserva el filtro de
+  seguridad; no se amplían los límites ni se cambia la calibración de usuario.
+- Pendiente: repetir **Detectar** sin movimiento y confirmar en la foto que las
+  dos retículas caen sobre los discos y que las coordenadas mostradas son las
+  correspondientes. Esta corrección offline no confirma aún la detección con
+  un fotograma nuevo ni el segundo viaje físico.
+
+## Ruido en la ayuda visual de Calibrar (30 de septiembre)
+
+- La foto activa de la cama produce 29 componentes con el umbral global: los dos
+  discos de referencia son redondos (25 px de diámetro), pero la malla, los
+  reflejos y bordes también aparecen como candidatos. Esta lista solo ayuda a
+  ajustar el clic; los puntos de calibración siguen siendo capturas manuales.
+- La foto congelada de la cenital ahora resalta solo componentes de área mínima
+  40 px, circularidad mínima 0.55 y relación de aspecto máxima 1.5. Se mantienen
+  el clic libre, el snap al candidato cercano y la homografía existentes.
+  Validar con una foto nueva y asegurar que cada marca de calibración tenga
+  forma redonda y contraste claro.
+- Si existe una homografía previa, los candidatos de esa vista se comparan con
+  la caja segura estimada de la máquina, pero los que queden fuera no se
+  descartan: se muestran en ámbar y se registran como diagnóstico. Son puntos
+  potencialmente válidos para calibrar aunque no sean destinos seguros de viaje.
+  Sin homografía, todos los candidatos de forma válida se muestran en verde.
+- La captura de pantalla local `Captura de pantalla 2026-09-30 155224.png`
+  muestra tres marcas verdes sobre la cama, tres discos oscuros sobre tarjetas
+  blancas sin retícula y candidatos ámbar en la guía lateral. Con `thr=0`,
+  `find_marks` usa Otsu global: omite discos grises con poco contraste y aun
+  detecta agujeros/reflejos circulares de la guía. No subir el umbral global sin
+  probarlo en toda la imagen: aumenta mucho la textura candidata y también
+  cambia la detección de Print and Cut. Para esta calibración se pueden marcar
+  manualmente los centros no resaltados; el clic es libre si no cae cerca de
+  otro candidato. Preferir iluminación difusa uniforme y puntos negros mate
+  sobre fondo blanco mate antes de cambiar el umbral del flujo de producción.
+- La calibración de LightBurn no se copia directamente: su alineación de cámara
+  es interna a LightBurn y esta app guarda su propia homografía píxel→mm de
+  máquina. Puede servir como referencia visual/procedimiento, pero la app debe
+  medir su propia   relación con la posición reportada por la Ruida.
+
+## Controles de Calibrar y viaje a Origen
+
+- `Origen 0,0` está habilitado únicamente para la orden nativa de coordenadas:
+  destino fijo (0,0), verificación de llegada y bloqueo fail-closed si la
+  controladora no confirma. Como con Mover 1/2, no se puede cancelar desde la
+  app; no enviar otra orden mientras el viaje esté activo. El jog activo debe
+  soltarse antes de solicitar el viaje.
+- La velocidad no forma parte del paquete `D9 10`: la determina el perfil/estado
+  de la controladora. El usuario informó que, después de abrir LightBurn e
+  intentar ir al origen, la velocidad de los viajes volvió a ser razonable. No
+  se ha aislado qué estado cambió; no añadir un supuesto parámetro de velocidad
+  al datagrama.
+- Calibrar ofrece un pad compacto de jog direccional con la misma semántica de
+  Vivo, paso visible compartido y rueda con saltos de 0.5 mm. Los visores en vivo
+  cenital/cabezal mantienen mayor espacio de pantalla al reducir el tamaño del
+  control. Print and Cut también tiene jog manual y un visor vivo ampliado del
+  cabezal (panel de 360 px, con retícula central resaltada), junto a la foto de
+  detección y las coordenadas. El botón de conexión está en Calibrar; Print and
+  Cut reutiliza el stream ya conectado.
+- Después de Detectar, el stream previo de cámaras se restaura para que el visor
+  del cabezal de Print and Cut siga actualizándose.
+- La foto congelada admite umbral (0 = Otsu) y área mínima configurables y
+  reaplica la detección sobre esa misma imagen. Los valores son locales a la
+  vista de calibración y no alteran el detector de Print and Cut ni `calib.json`.
+- La reconexión se ejecuta al terminar la captura incluso si esta lanza error;
+  el error se muestra en la pestaña y se conserva en el registro.
+- Última medición reportada tras ajustar la homografía: residuo máximo 0.309 mm,
+  medio 0.172 mm. La nueva interfaz aún requiere validación física de jog,
+  reconexión, velocidad y Origen; las pruebas automatizadas son offline y no
+  mueven el cabezal.
+- Corrección del usuario (30 de septiembre): los datos de los dos tests
+  compartidos antes estaban mal; no derivar de ellos el signo o la aplicación
+  del offset. Se revirtió la última modificación que movía la corrección de
+  `cam_offset_mm` del punto 1 al punto 2. Después se aclaró que las cifras de
+  `coords.txt` ya incluyen el offset mientras que la llegada nativa y las
+  coordenadas verdes corresponden a otro paso del flujo.
+- Datos nuevos reportados para Print and Cut:
+  - Detectadas: M1 `(292.373, 313.670)`, M2 `(214.466, 315.311)`.
+  - Verdes al mover: P1 `(341.506, 312.232)`, P2 `(312.730, 312.436)`.
+  - Reales: M1 `(341.274, 310.746)`, M2 `(263.817, 312.169)`.
+  - Diferencias verde - real: P1 `(+0.232, +1.486)` mm; P2
+    `(+48.913, +0.267)` mm. Las coordenadas reportadas no concuerdan
+    directamente en la lista porque usan pasos diferentes de la conversión de
+    offset. El usuario confirmó que los rótulos verdes son de esos movimientos
+    y que el tratamiento actual del offset es correcto. La diferencia residual
+    de centrado de la marca se investiga por separado, no cambiando el offset.
+- Aclaración aceptada por el usuario: `cmd_run --no-move` entrega las marcas
+  detectadas sin offset como destinos nativos, mientras `save_txt` suma
+  `cam_offset_mm` a las coordenadas de `coords.txt`. Por tanto, el log de
+  detección y el rótulo verde no muestran necesariamente la misma representación
+  de coordenadas; la conversión previa de `_fin_punto` se considera correcta y
+  quedó restaurada. No cambiarla por las primeras comparaciones erróneas.
+- **Pendiente para la siguiente sesión:** estudiar cómo centrar automáticamente
+  el campo de visión de la cámara del cabezal sobre el centro de la marca circular
+  después de cada llegada. La diferencia observada no es constante entre
+  ejecuciones; medir el centro detectado por frame, el offset fino aplicado y el
+  error final por iteración antes de cambiar calibración u homografía. Usar
+  pruebas offline/sintéticas primero y realizar movimiento físico solo con
+  confirmación explícita del usuario.
 
 ## Cambios locales de esta sesión
 

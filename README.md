@@ -30,9 +30,27 @@ y bloquea el cierre; deja libre la trayectoria y usa el paro físico de la
 controladora ante una emergencia. Cierra LightBurn antes de mover: ambos
 programas usan el puerto local 40200.
 
-`Origen 0,0`, `Estacionar` y **Detectar y centrar los 2** siguen deshabilitados;
-el jog manual permanece en 50207. Antes de probar, verifica que el láser esté
-deshabilitado y deja despejada la trayectoria.
+`Origen 0,0` usa el mismo viaje nativo con destino fijo (0, 0), comprueba la
+llegada y bloquea nuevos viajes si queda sin confirmar. No es cancelable desde
+la app. `Estacionar` en Calibrar y **Detectar y centrar los 2** siguen
+deshabilitados; el jog manual permanece en 50207. Antes de probar, verifica que
+el láser esté deshabilitado y deja despejada la trayectoria.
+
+El comando `D9 10` no incluye una velocidad: el perfil/estado de la controladora
+determina el ritmo. La app no puede acelerarlo con un parámetro de viaje. Si la
+velocidad parece anormal, comprueba el estado de la máquina con LightBurn antes
+de continuar; un timeout de confirmación no significa que el movimiento se haya
+detenido.
+
+En **Calibrar** hay un pad compacto de jog direccional (toque = paso; mantener =
+continuo), ajuste del paso con rueda en saltos de 0.5 mm, acceso para conectar
+cámaras y visores en vivo cenital/cabezal. Tras congelar una foto cenital se
+pueden variar el umbral (`0` usa Otsu) y el área mínima y aplicar de nuevo el
+detector a esa misma foto. **Print and Cut** también ofrece el jog y un visor en
+vivo ampliado del cabezal (panel lateral de 360 px, con retícula central
+resaltada) junto a la foto de detección. Los controles del detector afectan
+solo a la ayuda visual de Calibrar: no cambian Print and Cut ni guardan ajustes
+globales. La captura reconecta las cámaras que estaban activas incluso si falla.
 
 En la última prueba física, **Mover 1 alcanzó la primera marca**, pero no quedó
 centrado como se esperaba; hay que repetir la calibración y revisar la homografía
@@ -328,8 +346,10 @@ python hybrid_vision.py run --marks 2 --debug --emit coords.txt
 ```
 
 1. Cabezal al estacionamiento, foto general de la cama.
-2. Detecta las marcas, las proyecta a mm con la homografía y elige la **pareja más
-   separada** (la más robusta frente a detecciones falsas).
+2. Detecta las manchas, descarta las que proyectan fuera de la cama y elige la
+   pareja con los **componentes de mayor área**; la distancia desempata. Así un
+   reflejo pequeño dentro de la zona segura no reemplaza una marca real solo por
+   estar más lejos.
 3. Por cada marca: mueve el cabezal allí y entra en el lazo de centrado fino.
 4. Imprime las coordenadas finales y las deja en `coords.txt`.
 
