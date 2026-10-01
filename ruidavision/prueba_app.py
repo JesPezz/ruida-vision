@@ -523,15 +523,20 @@ def main():
     app.geometry("1200x780")
     app.update()
 
-    # Marcas lleva los cinco pasos, el visor, la lista y dos parrafos mas: a
-    # 1200 px de ancho son unos 680 px de alto. Sin scroll lo de abajo no se ve, y
-    # no hay forma de llegar. La ventana se baja a proposito para medirlo: en un
-    # monitor alto el texto cabe entero (en el PC de Windows, 678 px en 700), y
-    # entonces la comprobacion seria falsa por la pantalla y no por la app.
+    # Marcas lleva los cinco pasos, el visor, la lista y dos parrafos mas: unos
+    # 680 px de alto a 1200 de ancho, y la ventana minima son 620. Sin scroll lo
+    # de abajo no se ve y no hay forma de llegar. Pero en un monitor alto el
+    # texto cabe entero (en el PC de Windows, 678 px en 700) y entonces no hay
+    # nada que comprobar, ni que la ventana se pueda encoger por `geometry`
+    # (alli el resize no se aplica). Asi que se mete un separador gigante: el
+    # scroll tiene que aparecer y llegar al final en cualquier pantalla.
     ms = app.hoja_marcas
     hoja_antes = app.hojas.index("current")
     app.hojas.select(ms)
-    app.geometry("1200x560")
+    app.update()
+    separador = A.ttk.Frame(ms.interior, height=3000)
+    separador.pack()
+    app.update_idletasks()
     bombea(app, 0.3)
     alto = (ms.lienzo.bbox("all") or (0, 0, 0, 0))[3]
     chk("la hoja de Marcas se desplaza (%d px de texto en %d de alto)"
@@ -539,9 +544,8 @@ def main():
     ms.lienzo.yview_moveto(1.0)
     app.update()
     chk("se llega al final del texto de Marcas", ms.lienzo.yview()[1] == 1.0)
+    separador.pack_forget()
     ms.lienzo.yview_moveto(0.0)
-    app.update()
-    app.geometry("1200x780")
     app.update()
     chk("al cambiar de hoja el foco vuelve a la ventana (teclear no se queda "
         "en un Entry de la hoja que ya no se ve)", not app._escribiendo())
