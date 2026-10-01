@@ -664,7 +664,7 @@ class App(tk.Tk):
         if self.video and self.video.is_alive():
             return
         self.video = None
-        self.lbl_cam.configure(text="camaras: abriendo...")
+        self.lbl_cam.configure(text="camaras: abriendo...", style="Chico.TLabel")
         self.video = Video(self.cfg, self.log)
         self.video.start()
 
@@ -1686,7 +1686,7 @@ class App(tk.Tk):
             self._native_move_fault = True
             detalle = "ERROR al mover al origen: %s" % e
             self.log(detalle)
-            self.lbl_pos.configure(text=detalle)
+            self.lbl_pos.configure(text=detalle, style="Mal.TLabel")
             self._boton_origen()
             self._boton_mover()
             messagebox.showerror(
@@ -1696,7 +1696,8 @@ class App(tk.Tk):
                 parent=self)
             return
         self.pos, self._ok = pos, True
-        self.lbl_pos.configure(text="origen confirmado: X = %.3f  Y = %.3f mm" % pos)
+        self.lbl_pos.configure(text="origen confirmado: X = %.3f  Y = %.3f mm" % pos,
+                                style="Ok.TLabel")
         self.log("origen confirmado: %.3f, %.3f mm" % pos)
         self._boton_origen()
         self._boton_mover()
@@ -1985,13 +1986,14 @@ class App(tk.Tk):
         p = fu.result()
         if p:
             self.pos, self._ok = p, True
-            self.lbl_pos.configure(text="posicion:  X = %8.3f    Y = %8.3f mm" % p)
+            self.lbl_pos.configure(text="posicion:  X = %8.3f    Y = %8.3f mm" % p,
+                                   style="Ok.TLabel")
             self.lbl_pan.configure(text="panel %s: contesta" % self.cfg["ip"],
                                    style="Ok.TLabel")
         else:
             self.pos, self._ok = None, False
             self.lbl_pos.configure(text="posicion: el panel %s no contesta"
-                                   % self.cfg["ip"])
+                                   % self.cfg["ip"], style="Mal.TLabel")
             self.lbl_pan.configure(text="panel %s: SIN RESPUESTA" % self.cfg["ip"],
                                    style="Mal.TLabel")
 

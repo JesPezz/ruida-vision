@@ -704,6 +704,22 @@ def main():
     app.stop()
     app._native_move_active = False
     A.messagebox.showwarning = showwarning_real
+    # El estado en color es la senal de que el panel y las camaras viven o no.
+    # Si el verde/rojo se cae en un texto nuevo, el operador se queda mirando
+    # una linea gris pensando que todo va bien.
+    app._pos(SimpleNamespace(result=lambda: (12.5, -3.0)))
+    app._pos(SimpleNamespace(result=lambda: None))
+    app.conectar()
+    abrir = (app.lbl_pan.cget("style"), app.lbl_pos.cget("style"),
+             app.lbl_cam.cget("style"))
+    chk("la cabecera se pone roja cuando el panel no contesta",
+        abrir[0] == "Mal.TLabel" and abrir[1] == "Mal.TLabel"
+        and abrir[2] == "Chico.TLabel")
+    app.parar_cams()                   # cierra el hilo que abre conectar()
+    app._pos(SimpleNamespace(result=lambda: (12.5, -3.0)))
+    chk("la cabecera se pone verde cuando el panel contesta",
+        app.lbl_pan.cget("style") == "Ok.TLabel"
+        and app.lbl_pos.cget("style") == "Ok.TLabel")
     chk("Parar advierte que el viaje nativo no se puede cancelar",
         avisos and "no interrumpe" in avisos[0][1].lower())
     chk("centrado automatico tambien queda deshabilitado",
