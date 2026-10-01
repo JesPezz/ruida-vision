@@ -878,6 +878,47 @@ def main():
     # lo que importa es que el pool quede cerrado y el proceso pueda salir, que
     # es lo que se ve al terminar esta prueba sin que se quede colgada.
     chk("el pool de trabajo queda cerrado", app.pool._shutdown is True)
+
+    # El escalado de Windows: en Linux esto no se ejecuta nunca, asi que se
+    # falsea `sys.platform` y `ctypes.windll` para recorrer las cuatro ramas.
+    # Si el nombre de una API esta mal escrito, aqui no se ve y se rompe en el PC.
+    class WindllFalso:
+        def __init__(self, **respuestas):
+            self.respuestas, self.llamadas = respuestas, []
+
+        def __getattr__(self, dll):
+            yo = self
+
+            class Libreria:
+                def __getattr__(self, func):
+                    def llama(*a):
+                        yo.llamadas.append(dll + "." + func)
+                        return yo.respuestas.get(dll + "." + func, False)
+                    return llama
+            return Libreria()
+
+    import ctypes
+    plataforma = sys.platform
+    sys.platform = "win32"
+    try:
+        for resps, esperado in (
+                ({"user32.SetProcessDpiAwarenessContext": True}, "V2"),
+                ({"shcore.SetProcessDpiAwareness": True}, "por monitor"),
+                ({"user32.SetProcessDPIAware": True}, "del sistema"),
+                ({}, "por defecto")):
+            ctypes.windll = WindllFalso(**resps)
+            chk("el escalado cae en '%s'" % esperado,
+                esperado in A._dpi_awareness())
+        ctypes.windll = WindllFalso()
+        A._dpi_awareness()
+        chk("la primera llamada es la de Windows 10 (PER_MONITOR_AWARE_V2)",
+            ctypes.windll.llamadas[0]
+            == "user32.SetProcessDpiAwarenessContext")
+    finally:
+        sys.platform = plataforma
+        if hasattr(ctypes, "windll"):
+            del ctypes.windll
+
     A.hv.save_cfg = save_real          # ya nadie puede escribir el calib.json
     A.LOGF = log_original
     log_temporal.cleanup()

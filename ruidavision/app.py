@@ -116,6 +116,45 @@ SIN_CAM = "camaras: sin abrir (pulsa Conectar)"
 LASER = "LASER APAGADO: esto mueve el cabezal, no dispara"
 
 
+def _dpi_awareness():
+    """Que Windows no deforme la ventana en pantallas con escalado.
+
+    Sin esto el proceso es "DPI unaware": Windows lo dibuja a 96 DPI y lo
+    estira como una foto. En un portatil al 125-150 % sale borrosa, y el texto
+    y los botones se salen de la ventana, que es el mismo sintoma que se
+    acababa de arreglar con "Quitar punto". Per-Monitor V2 es lo que entiende
+    Windows 10 1703 en adelante; si no esta, al menos el nivel del sistema.
+
+    `SetProcessDpiAwarenessContext` toma un HANDLE, o sea un puntero de 64 bits:
+    hay que declararlo, porque si no `ctypes` pasa un entero de 32 y la llamada
+    falla sin decir nada.
+    """
+    if sys.platform != "win32":
+        return "escalado: no hace falta fuera de Windows"
+    import ctypes
+    try:
+        v2 = ctypes.windll.user32.SetProcessDpiAwarenessContext
+        v2.argtypes = [ctypes.c_void_p]
+        v2.restype = ctypes.c_int
+        if v2(ctypes.c_void_p(-4)):        # -4 = PER_MONITOR_AWARE_V2
+            return "escalado: por monitor (V2)"
+    except (AttributeError, OSError):
+        pass                            # Windows anterior a 1703
+    try:                                # Windows 8.1
+        if ctypes.windll.shcore.SetProcessDpiAwareness(2):
+            return "escalado: por monitor"
+    except (AttributeError, OSError):
+        pass
+    try:                                # Windows Vista y posteriores
+        if ctypes.windll.user32.SetProcessDPIAware():
+            return "escalado: del sistema"
+    except (AttributeError, OSError):
+        pass
+    # PyInstaller puede haberlo puesto ya en el arranque, y entonces esto no
+    # tiene arreglo: se deja como esta y el registro lo dice.
+    return "escalado: el de por defecto de Windows (puede salir borrosa)"
+
+
 # --------------------------------------------------------------------- registro
 
 class _Tee:
@@ -387,6 +426,10 @@ class Deslizable(ttk.Frame):
 
 class App(tk.Tk):
     def __init__(self):
+        # Antes de `super()`: la ventana es lo que hay que crear ya al tanto del
+        # escalado. Ademas se queda en el registro, que es como se sabe que ha
+        # surtido efecto en el PC de verdad.
+        self.dpi = _dpi_awareness()
         super().__init__()
         self.title("Ruida Vision %s" % VERSION)
         self.geometry("1200x780")
@@ -449,6 +492,7 @@ class App(tk.Tk):
         # de `_ota_vuelve`, y por el registro se ve que se ha mirado.
         self.after(800, self.ota)
         self.log("App %s. Datos en %s. %s" % (VERSION, DATOS, LASER))
+        self.log(self.dpi)
 
     # -- aspecto
     def _wrap_al_ancho(self):
