@@ -523,13 +523,16 @@ def main():
     app.geometry("1200x780")
     app.update()
 
-    # Marcas lleva los cinco pasos, el visor, la lista y dos parrafos mas: mas
-    # de 900 px de alto con una ventana minima de 620. Sin scroll lo de abajo no
-    # se ve, y no hay forma de llegar.
+    # Marcas lleva los cinco pasos, el visor, la lista y dos parrafos mas: a
+    # 1200 px de ancho son unos 680 px de alto. Sin scroll lo de abajo no se ve, y
+    # no hay forma de llegar. La ventana se baja a proposito para medirlo: en un
+    # monitor alto el texto cabe entero (en el PC de Windows, 678 px en 700), y
+    # entonces la comprobacion seria falsa por la pantalla y no por la app.
     ms = app.hoja_marcas
     hoja_antes = app.hojas.index("current")
     app.hojas.select(ms)
-    app.update()
+    app.geometry("1200x560")
+    bombea(app, 0.3)
     alto = (ms.lienzo.bbox("all") or (0, 0, 0, 0))[3]
     chk("la hoja de Marcas se desplaza (%d px de texto en %d de alto)"
         % (alto, ms.lienzo.winfo_height()), alto > ms.lienzo.winfo_height())
@@ -537,6 +540,8 @@ def main():
     app.update()
     chk("se llega al final del texto de Marcas", ms.lienzo.yview()[1] == 1.0)
     ms.lienzo.yview_moveto(0.0)
+    app.update()
+    app.geometry("1200x780")
     app.update()
     chk("al cambiar de hoja el foco vuelve a la ventana (teclear no se queda "
         "en un Entry de la hoja que ya no se ve)", not app._escribiendo())
