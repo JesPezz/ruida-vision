@@ -504,6 +504,26 @@ def main():
     app.geometry("1200x780")
     app.update()
 
+    # Marcas lleva los cinco pasos, el visor, la lista y dos parrafos mas: mas
+    # de 900 px de alto con una ventana minima de 620. Sin scroll lo de abajo no
+    # se ve, y no hay forma de llegar.
+    ms = app.hoja_marcas
+    hoja_antes = app.hojas.index("current")
+    app.hojas.select(ms)
+    app.update()
+    alto = (ms.lienzo.bbox("all") or (0, 0, 0, 0))[3]
+    chk("la hoja de Marcas se desplaza (%d px de texto en %d de alto)"
+        % (alto, ms.lienzo.winfo_height()), alto > ms.lienzo.winfo_height())
+    ms.lienzo.yview_moveto(1.0)
+    app.update()
+    chk("se llega al final del texto de Marcas", ms.lienzo.yview()[1] == 1.0)
+    ms.lienzo.yview_moveto(0.0)
+    app.update()
+    chk("al cambiar de hoja el foco vuelve a la ventana (teclear no se queda "
+        "en un Entry de la hoja que ya no se ve)", not app._escribiendo())
+    app.hojas.select(hoja_antes)        # como estaba: las pruebas de abajo
+    app.update()                         # cuentan con la hoja que sea
+
     # - y + eligen el paso de toque sin soltar el WASD, en saltos de 0.1 mm.
     chk("el paso de toque es un numero, no un desplegable",
         app.paso_mm == 0.5 and "0.5 mm" in app.lbl_paso.cget("text")
@@ -783,6 +803,17 @@ def main():
     chk("PARAR detiene el panel inmediatamente", pan.stops == 1)
     chk("PARAR tambien cancela el evento del jog continuo",
         ev_stop.is_set() and app._jog_ev is None)
+
+    # Cambiar de hoja con el WASD pulsado dejaba el cabezal andando: el
+    # KeyRelease lo recibia la hoja nueva y el continuo se quedaba vivo.
+    app.hojas.select(app.i_vivo)
+    app.update()
+    app._toque("+X")
+    bombea(app, 0.4)
+    ev2 = pan.jogs[-1][1] if pan.jogs else None
+    app.hojas.select(app.i_cal)          # <- el cambio de hoja
+    bombea(app, 0.2)
+    chk("cambiar de hoja corta el toque continuo", ev2 is not None and ev2.is_set())
 
     app.salir()
     # El hilo del pool sigue vivo un instante (parkado) despues del shutdown:
