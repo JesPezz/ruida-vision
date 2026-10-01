@@ -478,9 +478,18 @@ class App(tk.Tk):
         self.lbl_cam.pack(side="right", padx=18)
 
     def _pie(self):
-        self.txt = tk.Text(self, height=7, bg="#101418", fg="#cfd8dc",
-                           font=("Consolas", 9), wrap="none", state="disabled")
-        self.txt.pack(fill="x", side="bottom", padx=8, pady=(4, 0))
+        # El log va con barra: siete lineas no se leen con la rueda y no hay
+        # forma de volver atras. Y `wrap="word"` en vez de `wrap="none"`: con
+        # "none" la linea se sigue por debajo del borde y lo que no cabe no se
+        # ve nunca, que es justo lo que uno busca en el registro.
+        marco = ttk.Frame(self)
+        marco.pack(fill="both", side="bottom", padx=8, pady=(4, 0))
+        self.txt = tk.Text(marco, height=7, bg="#101418", fg="#cfd8dc",
+                           font=("Consolas", 9), wrap="word", state="disabled")
+        barra = ttk.Scrollbar(marco, orient="vertical", command=self.txt.yview)
+        self.txt.configure(yscrollcommand=barra.set)
+        self.txt.pack(side="left", fill="both", expand=True)
+        barra.pack(side="right", fill="y")
         # Grid y no pack: el boton va con sticky para que no se estire
         # horizontalmente y el aviso del OTA (que es largo) no lo aplaste. El
         # boton de buscar actualizaciones se fue: la app mira solo al arrancar.

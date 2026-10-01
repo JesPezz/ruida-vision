@@ -836,6 +836,24 @@ def main():
     bombea(app, 0.2)
     chk("cambiar de hoja corta el toque continuo", ev2 is not None and ev2.is_set())
 
+    # El registro es donde se mira cuando algo va mal: con wrap="none" las
+    # lineas largas (un error con una ruta, un paso de homografia) se perdian
+    # por debajo del borde sin scrollbar, y el texto de fondo lo hace ilegible.
+    app.txt.configure(state="normal")
+    app.txt.insert("end", "x" * 400 + "\nfin del registro\n")
+    app.txt.configure(state="disabled")
+    app.update()
+    app.txt.yview_moveto(1.0)            # al final, como hace la app
+    app.update()
+    # Con wrap="none" la linea de 400 caracteres se iba por debajo del borde y
+    # no habia scrollbar: lo que no cabia no se veia nunca. Con "word" la
+    # ultima linea cae dentro del alto del widget, que es lo que se comprueba.
+    y_ultima = app.txt.dlineinfo("end-1c")[1]
+    chk("el registro no corta las lineas largas y tiene barra",
+        app.txt.cget("wrap") == "word"
+        and bool(app.txt.cget("yscrollcommand"))
+        and y_ultima is not None and y_ultima <= app.txt.winfo_height())
+
     app.salir()
     # El hilo del pool sigue vivo un instante (parkado) despues del shutdown:
     # lo que importa es que el pool quede cerrado y el proceso pueda salir, que
