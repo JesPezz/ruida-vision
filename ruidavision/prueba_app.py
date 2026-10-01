@@ -501,6 +501,25 @@ def main():
     chk("ningun boton se sale de ventanas de 1200/940 px (%d mirados, fuera: %s, ventana %d)"
         % (medidos, chopped or "ninguno", app.winfo_width()),
         not chopped and medidos >= 40)
+
+    # Los `wraplength` fijos (980 px en Marcas) se salian por la derecha al
+    # bajar la ventana: el texto se seguia fuera del widget y no se leia el
+    # final de la frase. Ahora siguen al ancho de su marco.
+    texts = {}
+    for width in (1200, 940):
+        app.geometry("%dx780" % width)
+        app.hojas.select(app.i_marcas)
+        app.update()
+        for lbl in A.App._etiquetas(app):
+            w = int(lbl.cget("wraplength") or 0)
+            if w and lbl.master.winfo_width() > 40:
+                texts.setdefault(width, []).append(
+                    (w, lbl.master.winfo_width()))
+    fuera = [p for pares in texts.values() for p in pares if p[0] > p[1]]
+    medidos_textos = sum(len(p) for p in texts.values())
+    chk("ningun texto con wraplength se sale a 1200/940 px (%d mirados, fuera: %s)"
+        % (medidos_textos, fuera or "ninguno"),
+        not fuera and medidos_textos >= 4)
     app.geometry("1200x780")
     app.update()
 

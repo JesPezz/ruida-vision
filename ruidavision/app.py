@@ -432,6 +432,7 @@ class App(tk.Tk):
         self._hoja_marcas()
         self._hoja_ajustes()
         self._pie()
+        self._wrap_al_ancho()
         self.protocol("WM_DELETE_WINDOW", self.salir)
         self.hojas.bind("<<NotebookTabChanged>>", self._cambio_hoja)
         self.bind("<KeyPress>", self._tecla)
@@ -450,6 +451,37 @@ class App(tk.Tk):
         self.log("App %s. Datos en %s. %s" % (VERSION, DATOS, LASER))
 
     # -- aspecto
+    def _wrap_al_ancho(self):
+        """Que todo texto con `wraplength` siga al ancho de su marco.
+
+        Los `wraplength` fijos (980 px en Marcas) salen del limite: al bajar la
+        ventana a 940 px, que es el `minsize`, el texto se va por la derecha y
+        no se ve el final de la frase. Aqui cada etiqueta que lo tenga pasa a
+        medir lo que mide su marco, y asi el texto se reparte en cuanto se
+        estrecha la ventana.
+        """
+        for lbl in self._etiquetas(self):
+            fijo = int(lbl.cget("wraplength") or 0)
+            if fijo <= 0:
+                continue            # los que no envuelven, se dejan como estan
+            marco = lbl.master
+
+            def ajusta(e, lbl=lbl, marco=marco, fijo=fijo):
+                # Solo encoge: en ventana ancha manda el valor que ya estaba
+                # puesto, que es como se maquetó; al estrechar, el del marco.
+                ancho = max(120, min(fijo, e.width - 12))
+                if int(lbl.cget("wraplength")) != ancho:
+                    lbl.configure(wraplength=ancho)
+
+            marco.bind("<Configure>", ajusta, add="+")
+
+    @staticmethod
+    def _etiquetas(padre):
+        for w in padre.winfo_children():
+            if isinstance(w, ttk.Label):
+                yield w
+            yield from App._etiquetas(w)
+
     def _estilo(self):
         s = ttk.Style(self)
         for t in ("vista", "winnative", "clam"):
