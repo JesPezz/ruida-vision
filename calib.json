@@ -1,6 +1,6 @@
 {
   "ip": "192.168.1.50",
-  "top_cam": 2,
+  "top_cam": 1,
   "head_cam": 0,
   "res": [
     1920,
@@ -22,6 +22,7 @@
   "head_fov_mm": 32.58631560986781,
   "head_flip_x": 1,
   "head_flip_y": 1,
+  "wasd_flip": 0,
   "cam_offset_mm": [
     0.0,
     0.0
