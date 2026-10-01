@@ -1,13 +1,58 @@
 # Notas para la próxima sesión
 
-Estado: **v1.9, que es la v1.8 con la actualización automática al arrancar, Calibrar en
-cuatro celdas iguales, fuera el botón Estacionar de Vivo, y las marcas del Print and Cut
-otra vez en verde.** Todo lo de abajo está verificado (`py -u hybrid_vision.py test`,
-`python ruida.py test`, `/root/venv/bin/python -m ruidavision.actualizar test`, y
-`/root/venv/bin/python -m ruidavision.prueba_app` → 0 fallos de 63 comprobaciones).
-Lo que queda es lo que solo se puede comprobar con la máquina delante, y está al final.
+Estado: **v1.10, que es la v1.9 con los viajes nativos de LightBurn en Print and Cut,
+la hoja de Marcas desplazable, el jog compacto, el estado en color, el registro con
+barra, los textos que siguen el ancho, el escalado de Windows y las barras de botones
+que ya no se salen.** Verificado con `py -u hybrid_vision.py test`, `python ruida.py
+test`, `python -m ruidavision.actualizar test` y `python -m ruidavision.prueba_app`
+→ 0 fallos. Lo que queda es lo que solo se puede comprobar con la máquina delante, y
+está al final.
 
-## 0. Lo de esta versión (v1.9)
+## 0. Lo de esta versión (v1.10)
+
+1. **Viajes nativos (`D9 10`) en `Mover 1/2` y `Origen 0,0`.** `ruida.py` reproduce el
+   datagrama capturado de LightBurn, recorta a la mesa (0..500 × 0..400 mm) y confirma
+   la llegada por la posición del panel antes de habilitar el siguiente punto
+   (`_marca_a` mide el error y avisa en mm si pasa de 0.5). `ir_a` bloquea si hay un
+   viaje activo, sin confirmar, o con el jog en mano. Recordatorio de seguridad: el
+   viaje **no se cancela** ni desde la app ni con el Stop de LightBurn, y la app avisa
+   antes de bloquear el cierre. Lo verificado por captura y confirmación del usuario
+   es el destino; el recorrido completo está pendiente de máquina (ver §5).
+2. **Print and Cut sin sobrepaso en diagonal** (`c81dd8b`): los trayectos largos se
+   parten en segmentos XY con temporizador, leyendo posición entre tramos y rematando
+   con pulsos cortos; el tiempo por tramo se deriva de la distancia.
+3. **Marcas desplazable** (`43ada34`): la hoja va dentro de `Deslizable`
+   (Canvas + Scrollbar), la botonera en dos filas, la rueda con `bind_all` saltando
+   widgets con scroll propio, y `_cambio_hoja` suelta el continuo + devuelve el foco
+   (con WASD pulsado el `KeyRelease` lo recibía la hoja nueva y el cabezal seguía
+   andando). Se añadió `self.hoja_marcas` para que la prueba lo encuentre.
+4. **Jog compacto y paso con `-`/`+`** (`c458bde`): fuera los tooltips (había que
+   esperar 600 ms para leer un icono), el paso se cambia sin soltar el WASD,
+   Calibrar enseña los tres visores a la vez, Marcas ya no sale en negro (muestra
+   `bed.png` con las manchas re-marcadas) y se arregla el `WinError 10048` que
+   abría un segundo panel en el 40207. Las barras de Vivo y Calibrar pasan a `grid`
+   de dos filas con `columnconfigure`, que es lo que evita que el último botón se
+   salga de la ventana.
+5. **Revisión de interfaz, cinco cosas** (esta sesión, commits `16965c7`, `dbaceb5`,
+   `1b760d8`, `faa0986`, `7654c3b`):
+   - *Estado en color*: `lbl_pos` con `Ok.TLabel`/`Mal.TLabel` (antes un
+     `panel: no contesta` salía en negro igual que una lectura buena) y
+     `"camaras: abriendo..."` vuelve a `Chico.TLabel` para no quedarse en rojo.
+   - *Registro*: `_pie()` pasa a `wrap="word"` dentro de un marco con
+     `ttk.Scrollbar` y `fill="both", expand=True` (pedía 2212 px con `fill="x"`).
+   - *Textos*: `_wrap_al_ancho()` ata cada `wraplength` al ancho de su marco con
+     `<Configure>` y **solo encoge**; las etiquetas sin `wraplength` no se tocan.
+   - *Escalado de Windows*: `_dpi_awareness()` en `__init__` **antes de**
+     `super().__init__()`; Per-Monitor V2 → `shcore` → `user32`, y el registro
+     dice cuál ha quedado. Ojo: el HANDLE necesita `argtypes`, si no ctypes pasa
+     un int de 32 y la llamada falla en silencio; y si PyInstaller ya lo puso en
+     el arranque no hay arreglo posible.
+   - *Pruebas*: `wraplength` a 940 px, el umbral del visor de Marcas (118 px, se
+     pedían 130), el reparto de la botonera de Calibrar a 940 px, y el `after` de
+     60 ms del corte de jog que dispara `_cambio_hoja` (si no, `ir_a` dice
+     "suelta primero el control de jog"). 94 comprobaciones, 0 fallos.
+
+## 0.bis. Lo de la v1.9
 
 1. **La actualización se mira sola al arrancar, sin botón.** El de `Buscar
    actualizaciones` estaba en el pie y no se veía; se quita y en su lugar `__init__`
@@ -38,7 +83,7 @@ Lo que queda es lo que solo se puede comprobar con la máquina delante, y está 
    (estaciona → mira la cama → lleva a cada marca → la recentra). `lbl_punto` empieza
    en rojo hasta que hay puntos, y pasa a verde con la posición real del cabezal.
 
-## 0.bis. Lo de la v1.7 y v1.8
+## 0.ter. Lo de la v1.7 y v1.8
 
 1. **El paso es un número en mm, no un desplegable** (`self.paso_mm`, `lbl_paso`,
    `_pon_paso`, `_cambia_paso`): `-` y `+` lo mueven en saltos de 0,1 mm entre

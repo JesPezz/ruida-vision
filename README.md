@@ -64,6 +64,48 @@ dibujaron y sus píxeles. Al probar desde el código, abre
 `py -3 -m ruidavision.app` desde la raíz del repositorio y revisa
 `%LOCALAPPDATA%\Ruida Vision\app.log`.
 
+## Qué cambió en la v1.10
+
+Nueve commits que salieron de usar la v1.9 con la máquina delante. Los cuatro
+primeros son de movimiento, los cinco de la ventana:
+
+- **`Mover 1 / Mover 2` y `Origen 0,0` viajan con el comando nativo de
+  posición.** Ya no son el jog simulado por teclas: `ruida.py` reproduce el
+  datagrama `D9 10` que se capturó de LightBurn, recorta las coordenadas a la
+  mesa (0..500 × 0..400 mm) y **confirma la llegada** por la posición del panel
+  antes de dejar mover el siguiente punto. Si no llega, lo dice con el error en
+  milímetros y bloquea el viaje. El viaje no se puede cancelar ni desde la app
+  ni desde el Stop de LightBurn: la controladora termina el desplazamiento.
+- **Print and Cut va más rápido en diagonal y no se pasa.** El jog por teclas se
+  quedaba corto en los trayectos largos. Ahora los recorridos se hacen en
+  segmentos XY con temporizador, leyendo la posición entre tramos y haciendo el
+  ajuste final a pulsos cortos; el tiempo por tramo se deduce de la distancia.
+- **La hoja de Marcas se desplaza.** El contenido de la hoja vive en un canvas
+  con barra vertical (`Deslizable`), la botonera pasa a dos filas para caber en
+  1200 px, y la rueda del ratón hace scroll saltando los widgets que ya tienen
+  scroll propio (Listbox, Text, Treeview, Entry). Al cambiar de hoja se suelta el
+  jog continuo y el foco vuelve a la ventana: con el WASD pulsado el `KeyRelease`
+  lo recibía la hoja nueva y el cabezal se quedaba andando.
+- **El paso se cambia sin soltar el WASD.** Las teclas `-` y `+` bajan y suben el
+  paso del toque, así que el paso fino se usa mientras se mueve en vez de obligar
+  a soltar la tecla. Los botones de jog son compactos y llevan su nombre escrito,
+  sin los iconos con leyenda flotante que había que esperar 600 ms para leer.
+- **Calibrar enseña los tres visores a la vez** (las dos cámaras en vivo y debajo
+  la foto congelada) y el visor del cabezal en Print and Cut pasa a 360 px. Marcas
+  ya no sale en negro: al terminar el run enseña `bed.png` con las manchas
+  re-marcadas por el mismo detector.
+- **El estado se ve en color.** La posición del cabezal y el texto de reconexión
+  de las cámaras pasan a verde/rojo: antes un `panel: no contesta` salía en negro
+  igual que una lectura buena.
+- **El registro se lee entero.** El pie lleva barra de desplazamiento y las
+  líneas largas se envuelven en vez de cortarse en el borde.
+- **Los textos largos siguen el ancho de la ventana** y **las barras de botones
+  ya no se salen** en 940 px: todo lo que está en `grid` ahora reparte columnas.
+- **La ventana se ve bien con el escalado de Windows.** La app pide Per-Monitor
+  V2 antes de crear la ventana, de modo que en pantallas al 125-150% los botones
+  y textos ya no se salen. La primera línea del registro dice qué escalado ha
+  quedado.
+
 ## Qué cambió en la v1.9
 
 Cuatro cosas que salieron de usar la v1.8 con la máquina delante:

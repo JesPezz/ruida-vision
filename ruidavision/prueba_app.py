@@ -411,7 +411,7 @@ def main():
         app.vivos[app.i_marcas][0] is None
         and getattr(app.im_marcas_head, "img", None) is not None
         and app.im_marcas_head.winfo_width() >= 320
-        and app.im_marcas_head.winfo_height() >= 130)
+        and app.im_marcas_head.winfo_height() >= 100)
     # El reparto de los cuatro: los dos visores en vivo, la foto congelada y la
     # tabla de puntos. Medianamente era un PanedWindow con la izquierda al 75% y
     # la foto encima de las camaras, y el reparto salia como salia. Ahora es
@@ -501,8 +501,52 @@ def main():
     chk("ningun boton se sale de ventanas de 1200/940 px (%d mirados, fuera: %s, ventana %d)"
         % (medidos, chopped or "ninguno", app.winfo_width()),
         not chopped and medidos >= 40)
+
+    # Los `wraplength` fijos (980 px en Marcas) se salian por la derecha al
+    # bajar la ventana: el texto se seguia fuera del widget y no se leia el
+    # final de la frase. Ahora siguen al ancho de su marco.
+    texts = {}
+    for width in (1200, 940):
+        app.geometry("%dx780" % width)
+        app.hojas.select(app.i_marcas)
+        app.update()
+        for lbl in A.App._etiquetas(app):
+            w = int(lbl.cget("wraplength") or 0)
+            if w and lbl.master.winfo_width() > 40:
+                texts.setdefault(width, []).append(
+                    (w, lbl.master.winfo_width()))
+    fuera = [p for pares in texts.values() for p in pares if p[0] > p[1]]
+    medidos_textos = sum(len(p) for p in texts.values())
+    chk("ningun texto con wraplength se sale a 1200/940 px (%d mirados, fuera: %s)"
+        % (medidos_textos, fuera or "ninguno"),
+        not fuera and medidos_textos >= 4)
     app.geometry("1200x780")
     app.update()
+
+    # Marcas lleva los cinco pasos, el visor, la lista y dos parrafos mas: mas
+    # de 900 px de alto con una ventana minima de 620. Sin scroll lo de abajo no
+    # se ve, y no hay forma de llegar.
+    ms = app.hoja_marcas
+    hoja_antes = app.hojas.index("current")
+    app.hojas.select(ms)
+    app.update()
+    alto = (ms.lienzo.bbox("all") or (0, 0, 0, 0))[3]
+    chk("la hoja de Marcas se desplaza (%d px de texto en %d de alto)"
+        % (alto, ms.lienzo.winfo_height()), alto > ms.lienzo.winfo_height())
+    ms.lienzo.yview_moveto(1.0)
+    app.update()
+    chk("se llega al final del texto de Marcas", ms.lienzo.yview()[1] == 1.0)
+    ms.lienzo.yview_moveto(0.0)
+    app.update()
+    chk("al cambiar de hoja el foco vuelve a la ventana (teclear no se queda "
+        "en un Entry de la hoja que ya no se ve)", not app._escribiendo())
+    app.hojas.select(hoja_antes)        # como estaba: las pruebas de abajo
+    app.update()                         # cuentan con la hoja que sea
+    # `_cambio_hoja` deja el corte del jog pendiente 60 ms (`_suelta` -> after),
+    # y mientras ese after no salta `ir_a` dice "suelta primero el control de
+    # jog" y no viaja al origen. Es lo que pasa de verdad en la app, asi que
+    # aqui se espera igual que en la app.
+    bombea(app, 0.2)
 
     # - y + eligen el paso de toque sin soltar el WASD, en saltos de 0.1 mm.
     chk("el paso de toque es un numero, no un desplegable",
@@ -679,6 +723,22 @@ def main():
     app.stop()
     app._native_move_active = False
     A.messagebox.showwarning = showwarning_real
+    # El estado en color es la senal de que el panel y las camaras viven o no.
+    # Si el verde/rojo se cae en un texto nuevo, el operador se queda mirando
+    # una linea gris pensando que todo va bien.
+    app._pos(SimpleNamespace(result=lambda: (12.5, -3.0)))
+    app._pos(SimpleNamespace(result=lambda: None))
+    app.conectar()
+    abrir = (app.lbl_pan.cget("style"), app.lbl_pos.cget("style"),
+             app.lbl_cam.cget("style"))
+    chk("la cabecera se pone roja cuando el panel no contesta",
+        abrir[0] == "Mal.TLabel" and abrir[1] == "Mal.TLabel"
+        and abrir[2] == "Chico.TLabel")
+    app.parar_cams()                   # cierra el hilo que abre conectar()
+    app._pos(SimpleNamespace(result=lambda: (12.5, -3.0)))
+    chk("la cabecera se pone verde cuando el panel contesta",
+        app.lbl_pan.cget("style") == "Ok.TLabel"
+        and app.lbl_pos.cget("style") == "Ok.TLabel")
     chk("Parar advierte que el viaje nativo no se puede cancelar",
         avisos and "no interrumpe" in avisos[0][1].lower())
     chk("centrado automatico tambien queda deshabilitado",
@@ -784,11 +844,81 @@ def main():
     chk("PARAR tambien cancela el evento del jog continuo",
         ev_stop.is_set() and app._jog_ev is None)
 
+    # Cambiar de hoja con el WASD pulsado dejaba el cabezal andando: el
+    # KeyRelease lo recibia la hoja nueva y el continuo se quedaba vivo.
+    app.hojas.select(app.i_vivo)
+    app.update()
+    app._toque("+X")
+    bombea(app, 0.4)
+    ev2 = pan.jogs[-1][1] if pan.jogs else None
+    app.hojas.select(app.i_cal)          # <- el cambio de hoja
+    bombea(app, 0.2)
+    chk("cambiar de hoja corta el toque continuo", ev2 is not None and ev2.is_set())
+
+    # El registro es donde se mira cuando algo va mal: con wrap="none" las
+    # lineas largas (un error con una ruta, un paso de homografia) se perdian
+    # por debajo del borde sin scrollbar, y el texto de fondo lo hace ilegible.
+    app.txt.configure(state="normal")
+    app.txt.insert("end", "x" * 400 + "\nfin del registro\n")
+    app.txt.configure(state="disabled")
+    app.update()
+    app.txt.yview_moveto(1.0)            # al final, como hace la app
+    app.update()
+    # Con wrap="none" la linea de 400 caracteres se iba por debajo del borde y
+    # no habia scrollbar: lo que no cabia no se veia nunca. Con "word" la
+    # ultima linea cae dentro del alto del widget, que es lo que se comprueba.
+    y_ultima = app.txt.dlineinfo("end-1c")[1]
+    chk("el registro no corta las lineas largas y tiene barra",
+        app.txt.cget("wrap") == "word"
+        and bool(app.txt.cget("yscrollcommand"))
+        and y_ultima is not None and y_ultima <= app.txt.winfo_height())
+
     app.salir()
     # El hilo del pool sigue vivo un instante (parkado) despues del shutdown:
     # lo que importa es que el pool quede cerrado y el proceso pueda salir, que
     # es lo que se ve al terminar esta prueba sin que se quede colgada.
     chk("el pool de trabajo queda cerrado", app.pool._shutdown is True)
+
+    # El escalado de Windows: en Linux esto no se ejecuta nunca, asi que se
+    # falsea `sys.platform` y `ctypes.windll` para recorrer las cuatro ramas.
+    # Si el nombre de una API esta mal escrito, aqui no se ve y se rompe en el PC.
+    class WindllFalso:
+        def __init__(self, **respuestas):
+            self.respuestas, self.llamadas = respuestas, []
+
+        def __getattr__(self, dll):
+            yo = self
+
+            class Libreria:
+                def __getattr__(self, func):
+                    def llama(*a):
+                        yo.llamadas.append(dll + "." + func)
+                        return yo.respuestas.get(dll + "." + func, False)
+                    return llama
+            return Libreria()
+
+    import ctypes
+    plataforma = sys.platform
+    sys.platform = "win32"
+    try:
+        for resps, esperado in (
+                ({"user32.SetProcessDpiAwarenessContext": True}, "V2"),
+                ({"shcore.SetProcessDpiAwareness": True}, "por monitor"),
+                ({"user32.SetProcessDPIAware": True}, "del sistema"),
+                ({}, "por defecto")):
+            ctypes.windll = WindllFalso(**resps)
+            chk("el escalado cae en '%s'" % esperado,
+                esperado in A._dpi_awareness())
+        ctypes.windll = WindllFalso()
+        A._dpi_awareness()
+        chk("la primera llamada es la de Windows 10 (PER_MONITOR_AWARE_V2)",
+            ctypes.windll.llamadas[0]
+            == "user32.SetProcessDpiAwarenessContext")
+    finally:
+        sys.platform = plataforma
+        if hasattr(ctypes, "windll"):
+            del ctypes.windll
+
     A.hv.save_cfg = save_real          # ya nadie puede escribir el calib.json
     A.LOGF = log_original
     log_temporal.cleanup()

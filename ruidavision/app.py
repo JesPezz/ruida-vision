@@ -116,6 +116,45 @@ SIN_CAM = "camaras: sin abrir (pulsa Conectar)"
 LASER = "LASER APAGADO: esto mueve el cabezal, no dispara"
 
 
+def _dpi_awareness():
+    """Que Windows no deforme la ventana en pantallas con escalado.
+
+    Sin esto el proceso es "DPI unaware": Windows lo dibuja a 96 DPI y lo
+    estira como una foto. En un portatil al 125-150 % sale borrosa, y el texto
+    y los botones se salen de la ventana, que es el mismo sintoma que se
+    acababa de arreglar con "Quitar punto". Per-Monitor V2 es lo que entiende
+    Windows 10 1703 en adelante; si no esta, al menos el nivel del sistema.
+
+    `SetProcessDpiAwarenessContext` toma un HANDLE, o sea un puntero de 64 bits:
+    hay que declararlo, porque si no `ctypes` pasa un entero de 32 y la llamada
+    falla sin decir nada.
+    """
+    if sys.platform != "win32":
+        return "escalado: no hace falta fuera de Windows"
+    import ctypes
+    try:
+        v2 = ctypes.windll.user32.SetProcessDpiAwarenessContext
+        v2.argtypes = [ctypes.c_void_p]
+        v2.restype = ctypes.c_int
+        if v2(ctypes.c_void_p(-4)):        # -4 = PER_MONITOR_AWARE_V2
+            return "escalado: por monitor (V2)"
+    except (AttributeError, OSError):
+        pass                            # Windows anterior a 1703
+    try:                                # Windows 8.1
+        if ctypes.windll.shcore.SetProcessDpiAwareness(2):
+            return "escalado: por monitor"
+    except (AttributeError, OSError):
+        pass
+    try:                                # Windows Vista y posteriores
+        if ctypes.windll.user32.SetProcessDPIAware():
+            return "escalado: del sistema"
+    except (AttributeError, OSError):
+        pass
+    # PyInstaller puede haberlo puesto ya en el arranque, y entonces esto no
+    # tiene arreglo: se deja como esta y el registro lo dice.
+    return "escalado: el de por defecto de Windows (puede salir borrosa)"
+
+
 # --------------------------------------------------------------------- registro
 
 class _Tee:
@@ -330,10 +369,67 @@ class Foto(tk.Canvas):
         self.al_clic(x, y)
 
 
+class Deslizable(ttk.Frame):
+    """Una hoja que cabe en la ventana y se desplaza si no cabe entera.
+
+    Marcas lleva los cinco pasos escritos, el visor, la lista de coordenadas y
+    los otros dos parrafos: mas de 900 px de alto, y la ventana minima son 620.
+    Sin esto lo de abajo se ve a medias y no hay forma de llegar al final.
+
+    Solo para hojas de contenido FIJO. Vivo y Calibrar no llevan esto a proposito:
+    ahi lo que crece es el visor de las camaras, que necesita el `expand` del
+    `pack`, y dentro de un `Canvas` de scroll eso no existe (el hijo se queda en
+    su alto pedido)."""
+
+    def __init__(self, padre):
+        super().__init__(padre)
+        self.lienzo = tk.Canvas(self, highlightthickness=0, bd=0,
+                                background=ttk.Style().lookup("TFrame", "background")
+                                or self.cget("background"))
+        self.barra = ttk.Scrollbar(self, orient="vertical",
+                                   command=self.lienzo.yview)
+        self.lienzo.configure(yscrollcommand=self.barra.set)
+        self.lienzo.pack(side="left", fill="both", expand=True)
+        self.barra.pack(side="right", fill="y")
+        self.interior = ttk.Frame(self.lienzo, padding=8)
+        self._id = self.lienzo.create_window((0, 0), window=self.interior,
+                                             anchor="nw")
+        self.interior.bind("<Configure>", self._medida)
+        self.lienzo.bind("<Configure>", self._ancho)
+        # Windows manda la rueda a la ventana del FOCO, no al widget que hay
+        # debajo del raton: con el raton sobre el texto, sin esto no se
+        # desplaza. `bind_all` porque Tk no propaga la rueda a los hijos.
+        self.lienzo.bind_all("<MouseWheel>", self._rueda)
+
+    def _medida(self, e):
+        self.lienzo.configure(scrollregion=self.lienzo.bbox("all"))
+
+    def _ancho(self, e):
+        # El interior toma el ancho del lienzo: si no, se queda en el ancho que
+        # pidio al construir y el texto se parte por donde le da la gana.
+        self.lienzo.itemconfigure(self._id, width=e.width)
+
+    def _rueda(self, e):
+        w = e.widget
+        # Los widgets con scroll propio se desplazan ellos; el resto de la hoja,
+        # si.
+        if isinstance(w, (tk.Listbox, tk.Text, tk.Canvas, ttk.Treeview,
+                          ttk.Entry, tk.Entry, ttk.Combobox)):
+            return
+        if not (w is self or w is self.lienzo or str(w).startswith(str(self) + ".")):
+            return
+        self.lienzo.yview_scroll(-1 if e.delta > 0 else 1, "units")
+        return "break"
+
+
 # --------------------------------------------------------------------- la app
 
 class App(tk.Tk):
     def __init__(self):
+        # Antes de `super()`: la ventana es lo que hay que crear ya al tanto del
+        # escalado. Ademas se queda en el registro, que es como se sabe que ha
+        # surtido efecto en el PC de verdad.
+        self.dpi = _dpi_awareness()
         super().__init__()
         self.title("Ruida Vision %s" % VERSION)
         self.geometry("1200x780")
@@ -379,7 +475,9 @@ class App(tk.Tk):
         self._hoja_marcas()
         self._hoja_ajustes()
         self._pie()
+        self._wrap_al_ancho()
         self.protocol("WM_DELETE_WINDOW", self.salir)
+        self.hojas.bind("<<NotebookTabChanged>>", self._cambio_hoja)
         self.bind("<KeyPress>", self._tecla)
         self.bind("<KeyRelease>", self._suelta_tecla)
         self.after(33, self._pintar)
@@ -394,8 +492,40 @@ class App(tk.Tk):
         # de `_ota_vuelve`, y por el registro se ve que se ha mirado.
         self.after(800, self.ota)
         self.log("App %s. Datos en %s. %s" % (VERSION, DATOS, LASER))
+        self.log(self.dpi)
 
     # -- aspecto
+    def _wrap_al_ancho(self):
+        """Que todo texto con `wraplength` siga al ancho de su marco.
+
+        Los `wraplength` fijos (980 px en Marcas) salen del limite: al bajar la
+        ventana a 940 px, que es el `minsize`, el texto se va por la derecha y
+        no se ve el final de la frase. Aqui cada etiqueta que lo tenga pasa a
+        medir lo que mide su marco, y asi el texto se reparte en cuanto se
+        estrecha la ventana.
+        """
+        for lbl in self._etiquetas(self):
+            fijo = int(lbl.cget("wraplength") or 0)
+            if fijo <= 0:
+                continue            # los que no envuelven, se dejan como estan
+            marco = lbl.master
+
+            def ajusta(e, lbl=lbl, marco=marco, fijo=fijo):
+                # Solo encoge: en ventana ancha manda el valor que ya estaba
+                # puesto, que es como se maquetó; al estrechar, el del marco.
+                ancho = max(120, min(fijo, e.width - 12))
+                if int(lbl.cget("wraplength")) != ancho:
+                    lbl.configure(wraplength=ancho)
+
+            marco.bind("<Configure>", ajusta, add="+")
+
+    @staticmethod
+    def _etiquetas(padre):
+        for w in padre.winfo_children():
+            if isinstance(w, ttk.Label):
+                yield w
+            yield from App._etiquetas(w)
+
     def _estilo(self):
         s = ttk.Style(self)
         for t in ("vista", "winnative", "clam"):
@@ -424,9 +554,18 @@ class App(tk.Tk):
         self.lbl_cam.pack(side="right", padx=18)
 
     def _pie(self):
-        self.txt = tk.Text(self, height=7, bg="#101418", fg="#cfd8dc",
-                           font=("Consolas", 9), wrap="none", state="disabled")
-        self.txt.pack(fill="x", side="bottom", padx=8, pady=(4, 0))
+        # El log va con barra: siete lineas no se leen con la rueda y no hay
+        # forma de volver atras. Y `wrap="word"` en vez de `wrap="none"`: con
+        # "none" la linea se sigue por debajo del borde y lo que no cabe no se
+        # ve nunca, que es justo lo que uno busca en el registro.
+        marco = ttk.Frame(self)
+        marco.pack(fill="both", side="bottom", padx=8, pady=(4, 0))
+        self.txt = tk.Text(marco, height=7, bg="#101418", fg="#cfd8dc",
+                           font=("Consolas", 9), wrap="word", state="disabled")
+        barra = ttk.Scrollbar(marco, orient="vertical", command=self.txt.yview)
+        self.txt.configure(yscrollcommand=barra.set)
+        self.txt.pack(side="left", fill="both", expand=True)
+        barra.pack(side="right", fill="y")
         # Grid y no pack: el boton va con sticky para que no se estire
         # horizontalmente y el aviso del OTA (que es largo) no lo aplaste. El
         # boton de buscar actualizaciones se fue: la app mira solo al arrancar.
@@ -610,7 +749,7 @@ class App(tk.Tk):
         if self.video and self.video.is_alive():
             return
         self.video = None
-        self.lbl_cam.configure(text="camaras: abriendo...")
+        self.lbl_cam.configure(text="camaras: abriendo...", style="Chico.TLabel")
         self.video = Video(self.cfg, self.log)
         self.video.start()
 
@@ -772,6 +911,15 @@ class App(tk.Tk):
             self._suelta(d)
             return "break"
 
+    def _cambio_hoja(self, e=None):
+        """Al cambiar de hoja se suelta el toque continuo y el foco vuelve a la
+        ventana. Sin esto, un WASD mantenido mientras se pulsa otra pestana deja
+        el cabezal andando (el KeyRelease lo recibe la hoja nueva), y el foco se
+        queda en un Entry de la hoja que ya no se ve, donde teclear no mueve
+        nada."""
+        self._suelta()
+        self.focus_set()
+
     def _escribiendo(self):
         """Con el foco en un campo, teclear es escribir, no mover el cabezal."""
         return isinstance(self.focus_get(), (ttk.Entry, tk.Entry))
@@ -816,8 +964,8 @@ class App(tk.Tk):
         self.i_cal = self.hojas.index(h)
         b = ttk.Frame(h)
         b.pack(fill="x")
-        # Igual que en Vivo: dos filas, porque los nombres en una sola pedian
-        # 1650 px y el ultimo boton se salia de la ventana.
+        for col in range(4):
+            b.columnconfigure(col, weight=1, uniform="cal_b")
         for col, (nombre, cmd) in enumerate((
                 ("1. Estacionar", self.cal_park),
                 ("Congelar foto", self.cal_foto),
@@ -1331,9 +1479,13 @@ class App(tk.Tk):
 
     # --------------------------------------------------------- hoja "marcas"
     def _hoja_marcas(self):
-        h = ttk.Frame(self.hojas, padding=8)
-        self.hojas.add(h, text="  Marcas (Print and Cut)  ")
-        self.i_marcas = self.hojas.index(h)
+        # Deslizable y no un Frame: esta hoja es la unica con texto fijo que no
+        # cabe en la ventana minima.
+        hoja = Deslizable(self.hojas)
+        self.hojas.add(hoja, text="  Marcas (Print and Cut)  ")
+        self.i_marcas = self.hojas.index(hoja)
+        self.hoja_marcas = hoja
+        h = hoja.interior
         x0, y0, x1, y1 = hv.area_trabajo()
         ttk.Label(h, text=(
             "Como va, paso a paso:  1) pon la plantilla en el centro del area de "
@@ -1352,25 +1504,33 @@ class App(tk.Tk):
 
         b = ttk.Frame(h)
         b.pack(fill="x")
-        self.lbl_marcas = ttk.Label(b, text="", style="Ok.TLabel")
+        # Dos filas como en Vivo y Calibrar, por el mismo motivo que ahi: esta
+        # fila pedia 1519 px y en una ventana de 1200 los botones de la derecha
+        # solo se veian porque el marco los recortaba. Arriba lo que se pulsa,
+        # abajo los numeros que se cambian.
+        f0 = ttk.Frame(b)
+        f0.pack(fill="x")
+        f1 = ttk.Frame(b)
+        f1.pack(fill="x", pady=(3, 0))
+        self.lbl_marcas = ttk.Label(f0, text="", style="Ok.TLabel")
         self.lbl_marcas.pack(side="left")
-        boton(b, "Detectar los dos puntos", self.detectar).pack(
+        boton(f0, "Detectar los dos puntos", self.detectar).pack(
             side="left", padx=(8, 2))
-        self.btn_mover = boton(b, "Mover", self.mover_marca)
+        self.btn_mover = boton(f0, "Mover", self.mover_marca)
         self.btn_mover.pack(side="left", padx=2)
-        self.btn_run_marcas = boton(b, "Detectar y centrar los 2", self.run_marcas)
+        self.btn_run_marcas = boton(f0, "Detectar y centrar los 2", self.run_marcas)
         self.btn_run_marcas.pack(side="left", padx=(14, 2))
         if not ruida.Panel.AUTOMATIC_MOVE_ENABLED:
             self.btn_run_marcas.configure(state="disabled")
-        self.v_marcas = self._ent(b, "marcas", 2)
-        self.v_it = self._ent(b, "iteraciones", 4)
-        self.v_tol = self._ent(b, "tolerancia mm", "0.1")
-        ttk.Label(b, text="  ROI mm x0,y0,x1,y1:").pack(side="left", padx=(16, 3))
-        self.v_roi = ttk.Entry(b, width=24)
-        self.v_roi.pack(side="left", padx=4)
-        boton(b, "Ver coords.txt", self.abrir_coords).pack(side="right")
-        boton(b, "Copiar coordenadas", self.copiar).pack(
+        boton(f0, "Ver coords.txt", self.abrir_coords).pack(side="right")
+        boton(f0, "Copiar coordenadas", self.copiar).pack(
             side="right", padx=4)
+        self.v_marcas = self._ent(f1, "marcas", 2)
+        self.v_it = self._ent(f1, "iteraciones", 4)
+        self.v_tol = self._ent(f1, "tolerancia mm", "0.1")
+        ttk.Label(f1, text="  ROI mm x0,y0,x1,y1:").pack(side="left", padx=(16, 3))
+        self.v_roi = ttk.Entry(f1, width=24)
+        self.v_roi.pack(side="left", padx=4)
 
         # Lo que se copia a mano en LightBurn: la posicion REAL que tiene el
         # cabezal en este punto. Es la que se lee, no la que se calculo, y es
@@ -1611,7 +1771,7 @@ class App(tk.Tk):
             self._native_move_fault = True
             detalle = "ERROR al mover al origen: %s" % e
             self.log(detalle)
-            self.lbl_pos.configure(text=detalle)
+            self.lbl_pos.configure(text=detalle, style="Mal.TLabel")
             self._boton_origen()
             self._boton_mover()
             messagebox.showerror(
@@ -1621,7 +1781,8 @@ class App(tk.Tk):
                 parent=self)
             return
         self.pos, self._ok = pos, True
-        self.lbl_pos.configure(text="origen confirmado: X = %.3f  Y = %.3f mm" % pos)
+        self.lbl_pos.configure(text="origen confirmado: X = %.3f  Y = %.3f mm" % pos,
+                                style="Ok.TLabel")
         self.log("origen confirmado: %.3f, %.3f mm" % pos)
         self._boton_origen()
         self._boton_mover()
@@ -1910,13 +2071,14 @@ class App(tk.Tk):
         p = fu.result()
         if p:
             self.pos, self._ok = p, True
-            self.lbl_pos.configure(text="posicion:  X = %8.3f    Y = %8.3f mm" % p)
+            self.lbl_pos.configure(text="posicion:  X = %8.3f    Y = %8.3f mm" % p,
+                                   style="Ok.TLabel")
             self.lbl_pan.configure(text="panel %s: contesta" % self.cfg["ip"],
                                    style="Ok.TLabel")
         else:
             self.pos, self._ok = None, False
             self.lbl_pos.configure(text="posicion: el panel %s no contesta"
-                                   % self.cfg["ip"])
+                                   % self.cfg["ip"], style="Mal.TLabel")
             self.lbl_pan.configure(text="panel %s: SIN RESPUESTA" % self.cfg["ip"],
                                    style="Mal.TLabel")
 
