@@ -879,8 +879,8 @@ class App(tk.Tk):
         self.i_cal = self.hojas.index(h)
         b = ttk.Frame(h)
         b.pack(fill="x")
-        # Igual que en Vivo: dos filas, porque los nombres en una sola pedian
-        # 1650 px y el ultimo boton se salia de la ventana.
+        for col in range(4):
+            b.columnconfigure(col, weight=1, uniform="cal_b")
         for col, (nombre, cmd) in enumerate((
                 ("1. Estacionar", self.cal_park),
                 ("Congelar foto", self.cal_foto),

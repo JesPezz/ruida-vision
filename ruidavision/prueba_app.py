@@ -411,7 +411,7 @@ def main():
         app.vivos[app.i_marcas][0] is None
         and getattr(app.im_marcas_head, "img", None) is not None
         and app.im_marcas_head.winfo_width() >= 320
-        and app.im_marcas_head.winfo_height() >= 130)
+        and app.im_marcas_head.winfo_height() >= 100)
     # El reparto de los cuatro: los dos visores en vivo, la foto congelada y la
     # tabla de puntos. Medianamente era un PanedWindow con la izquierda al 75% y
     # la foto encima de las camaras, y el reparto salia como salia. Ahora es
@@ -523,6 +523,11 @@ def main():
         "en un Entry de la hoja que ya no se ve)", not app._escribiendo())
     app.hojas.select(hoja_antes)        # como estaba: las pruebas de abajo
     app.update()                         # cuentan con la hoja que sea
+    # `_cambio_hoja` deja el corte del jog pendiente 60 ms (`_suelta` -> after),
+    # y mientras ese after no salta `ir_a` dice "suelta primero el control de
+    # jog" y no viaja al origen. Es lo que pasa de verdad en la app, asi que
+    # aqui se espera igual que en la app.
+    bombea(app, 0.2)
 
     # - y + eligen el paso de toque sin soltar el WASD, en saltos de 0.1 mm.
     chk("el paso de toque es un numero, no un desplegable",
