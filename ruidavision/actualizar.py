@@ -180,6 +180,7 @@ def test():
     chk("numeros de v1.10", numeros("v1.10"), (1, 10))
     chk("1.9 es mas viejo que 1.10", hay_actualizacion("1.9", "v1.10"), True)
     chk("1.10 no es mas nuevo que 1.10", hay_actualizacion("1.10", "v1.10"), False)
+    chk("2.0 es mas nuevo que 1.10", hay_actualizacion("1.10", "v2.0"), True)
     chk("1.2 es mas viejo que 1.1", hay_actualizacion("1.2", "v1.1"), False)
     chk("sin tag no hay actualizacion", hay_actualizacion("1.0", ""), False)
     chk("release sin adjuntos", instalador({"assets": []}), {})
@@ -208,7 +209,7 @@ def test():
     chk("el instalador va con /CLOSEAPPLICATIONS",
         all(a in _orden(ruta_ok) for a in ARGUMENTOS), True)
     print("actualizador: %d comprobaciones OK" % ok)
-    return 0 if ok == 13 else 1
+    return 0 if ok == 14 else 1
 
 
 if __name__ == "__main__":

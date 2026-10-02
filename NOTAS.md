@@ -1,14 +1,39 @@
 # Notas para la próxima sesión
 
-Estado: **v1.10, que es la v1.9 con los viajes nativos de LightBurn en Print and Cut,
+Estado: **v2.0, que es la v1.9 con los viajes nativos de LightBurn en Print and Cut,
 la hoja de Marcas desplazable, el jog compacto, el estado en color, el registro con
 barra, los textos que siguen el ancho, el escalado de Windows y las barras de botones
 que ya no se salen.** Verificado con `py -u hybrid_vision.py test`, `python ruida.py
 test`, `python -m ruidavision.actualizar test` y `python -m ruidavision.prueba_app`
 → 0 fallos. Lo que queda es lo que solo se puede comprobar con la máquina delante, y
-está al final.
+está al final. **El diario de las pruebas con la máquina es `coplitovs-notas.md`:
+si algo de §5 se contradice con ese fichero, el fichero manda.**
 
-## 0. Lo de esta versión (v1.10)
+## 0. Lo de esta versión (v2.0)
+
+Nota de numeración: esta entrega se publicó como **v1.10** por error; el número que
+le tocaba, el siguiente a la v1.9, es **2.0**. La release `v1.10` queda como está
+(no se puede renumerar) y el próximo build ya sale con `VERSION = "2.0"`. El
+comparador del actualizador usa tuplas de enteros, así que quien tenga la 1.10 verá
+la 2.0 como nueva (`actualizar.py test` lo comprueba).
+
+0. **El panel ya no se pisa a sí mismo (carrera en el socket de posición).** El
+   `Panel` es uno solo y su socket lo tocan a la vez el poll de posición a 3 Hz de la
+   app (`app.py:_cada_paso`) y el hilo del viaje nativo, el jog y el `Parar`. Todo
+   eso corre en el pool de hilos, así que el "nunca desde la UI" del comentario era
+   cierto y no servía: `position()` → `_drain()` → `self._buf = b""` borraba el
+   informe que el otro tenía a medio montar en `_frame()`, `_pending` se lo robaba el
+   que llegara después, y el resultado era `position() → None` →
+   *se perdió la lectura de posición durante el movimiento*. Pasaba en cuanto el
+   viaje duraba lo suficiente para que el poll cayera dentro de la ventana de lectura
+   de 3 s, y por eso fallaba tanto el viaje largo a la marca 1 como el corto al
+   origen: no era lentitud ni el timeout, era una carrera.
+   Arreglo: `threading.RLock` en `Panel.__init__` (`Panel._lock`) que envuelve
+   `position()`, `handshake()` y —vía `_send()`— los `sendall` de `release`, `hold` y
+   `jog_hold`. El cerrojo se suelta en cuanto sale el paquete, nunca durante el pulso,
+   así que el poll no espera a que acabe un jog entero. El test de `ruida.py test`
+   lanza 4 hilos × 40 lecturas contra un socket que devuelve el informe partido en
+   dos trozos con 2 ms de retraso; sin cerrojo se pierden lecturas, con él ninguna.
 
 1. **Viajes nativos (`D9 10`) en `Mover 1/2` y `Origen 0,0`.** `ruida.py` reproduce el
    datagrama capturado de LightBurn, recorta a la mesa (0..500 × 0..400 mm) y confirma
@@ -252,6 +277,39 @@ cabe en pantalla.
 - Ayuda y textos con sombra negra (`_texto`) y escala 0.6, para que se lean.
 
 ## 5. Pendiente de máquina (no se puede comprobar sin ella)
+
+**La fuente de la verdad de lo que pasa con la máquina es `coplitovs-notas.md`**
+(diario de las pruebas físicas). Esto es solo el resumen, en orden:
+
+- **Mover 1 ya lleva el cabezal a la primera marca, pero no queda centrado.**
+  Antes de tocar el movimiento, repetir la calibración con puntos bien repartidos
+  por toda la cama y revisar error de reproyección, orientación y `cam_offset_mm`.
+- **La segunda marca se clasifica fuera del área segura** y no llega a tratarse
+  como objetivo. Causa sin aislar (calibración, homografía, ROI, frame o la marca
+  detectada): registrar por marca píxeles, mm, ROI y razón del rechazo, y
+  compararla con el área segura y con `coords.txt`. **No relajar `Panel.SAFE`**
+  para que el punto pase.
+- **Comprobar que el visor, las coordenadas mostradas y el destino enviado son
+  exactamente la misma pareja seleccionada.**
+- **`pick_pair` ya no se queda con el par más separado** (un reflejo de 61 px se
+  colaba por una marca): ahora prioriza el área del componente dentro del área
+  segura y desempata por distancia. Falta confirmar en la foto, con un fotograma
+  nuevo, que las dos retículas caen sobre los discos.
+- **Centrar automáticamente el FOV de la cámara del cabezal** sobre el centro de
+  la marca circular después de cada llegada. La diferencia observada no es
+  constante entre ejecuciones: medir el centro detectado por frame, el offset
+  fino aplicado y el error final por iteración antes de cambiar calibración u
+  homografía. Offline y sintético primero; movimiento físico solo con
+  confirmación explícita del usuario.
+- **Probar Mover 1 y Mover 2 por separado**, con el láser deshabilitado y el
+  recorrido despejado, cuando lo anterior esté resuelto.
+- **Respaldar la calibración** sin sobrescribir el `calib.json` de usuario
+  durante las pruebas.
+
+No tocar el offset por las comparaciones: `cmd_run --no-move` entrega los
+destinos **sin** `cam_offset_mm` y `save_txt` **sí** lo suma a `coords.txt`, así
+que el rótulo verde y el log de detección no son la misma representación de
+coordenadas. El usuario confirmó que el tratamiento actual es el correcto.
 
 Lo de la v1.7, en este orden:
 

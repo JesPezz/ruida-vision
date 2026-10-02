@@ -1,0 +1,4 @@
+# Finales de linea: se guardan LF en el repo y git los convierte segun la
+# plataforma. Sin esto, un arbol Windows (CRLF) sale como "modificado" entero
+# aunque el contenido sea identico al del indice.
+* text=auto

@@ -56,7 +56,8 @@ En la última prueba física, **Mover 1 alcanzó la primera marca**, pero no que
 centrado como se esperaba; hay que repetir la calibración y revisar la homografía
 y el offset antes de atribuirlo al movimiento. El detector también clasificó la
 segunda marca fuera del área segura. Investigar la coordenada, ROI y calibración
-sin relajar los límites de viaje.
+sin relajar los límites de viaje. El detalle de cada prueba con la máquina está
+en `coplitovs-notas.md`, que es el diario de campo.
 
 La detección resalta las mismas coordenadas/píxeles seleccionados por el
 detector con retículas grandes y numeradas; el registro indica cuántas se
@@ -64,7 +65,7 @@ dibujaron y sus píxeles. Al probar desde el código, abre
 `py -3 -m ruidavision.app` desde la raíz del repositorio y revisa
 `%LOCALAPPDATA%\Ruida Vision\app.log`.
 
-## Qué cambió en la v1.10
+## Qué cambió en la v2.0
 
 Nueve commits que salieron de usar la v1.9 con la máquina delante. Los cuatro
 primeros son de movimiento, los cinco de la ventana:
@@ -105,6 +106,12 @@ primeros son de movimiento, los cinco de la ventana:
   V2 antes de crear la ventana, de modo que en pantallas al 125-150% los botones
   y textos ya no se salen. La primera línea del registro dice qué escalado ha
   quedado.
+- **El panel ya no se pisa a sí mismo.** El socket de posición es uno solo y lo
+  usan a la vez el poll de 3 Hz de la app y el hilo del viaje nativo; el `_drain()`
+  de uno borraba el informe a medio montar del otro y el movimiento moría con
+  *se perdió la lectura de posición durante el movimiento*. Ahora las lecturas
+  y los envíos van con un cerrojo (`Panel._lock`), así que el poll espera a que
+  termine la del viaje en vez de destrozarla.
 
 ## Qué cambió en la v1.9
 
