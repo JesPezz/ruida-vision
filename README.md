@@ -38,17 +38,17 @@ pie; instalar sigue siendo cosa tuya. La instalación y la versión de código
 comparten `%LOCALAPPDATA%\Ruida Vision\calib.json` cuando existe. El registro
 está en `%LOCALAPPDATA%\Ruida Vision\app.log` (botón **Ver registro**).
 
-Índices de cámara (pueden cambiar si se conecta algo nuevo; confírmalos con
-**Buscar cámaras** / `py hybrid_vision.py scan`):
+Índices detectados en esta máquina (confírmalos con **Buscar cámaras** /
+`py hybrid_vision.py scan`; cualquier otro dispositivo USB que se enumere
+desplaza la numeración):
 
 | índice | cámara | config |
 |---|---|---|
 | 0 | IMX179 del cabezal (microscopio) | `head_cam` |
-| 1 | Galaxy A56 vía Enlace de Windows — descartada | — |
 | 2 | IMX179 cenital (tapa) | `top_cam` |
 
-Si desconectas el Galaxy, los índices se recomponen: vuelve a pasar `scan` y
-actualiza `top_cam` / `head_cam` en **Ajustes**. Para probar sin editar nada:
+Si cambia algún dispositivo, vuelve a pasar `scan` y actualiza `top_cam` /
+`head_cam` en **Ajustes**. Para probar sin editar nada:
 `py hybrid_vision.py cams --top 2 --head 0`.
 
 ---
