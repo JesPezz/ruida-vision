@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 JesPezz
+
 """Enlace UDP con controladora Ruida: movimiento (puerto 50200) y posicion en
 tiempo real (puerto 50207).
 

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 JesPezz
+
 """Actualizacion OTA: mira la ultima release de GitHub y ejecuta su instalador.
 
 Solo biblioteca estandar (urllib, json, subprocess): un actualizador que

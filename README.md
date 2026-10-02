@@ -8,6 +8,11 @@ las coordenadas listas para pegarlas en LightBurn.
 El PC que ejecuta la app es el mismo al que están enchufadas las cámaras y debe
 estar en la red de la Ruida. No hay Raspberry en este proyecto.
 
+> **Aviso:** software experimental, distribuido **sin ninguna garantía**. Mueve
+> la cabeza de un láser CO₂: revísalo antes de usarlo, pruébalo con el láser
+> deshabilitado y úsalo bajo tu propia responsabilidad. No sustituye a los paros
+> de seguridad de la máquina.
+
 ```
 ruida.py          red: mover el cabezal y leer su posición real (sin dependencias)
 hybrid_vision.py  cámaras, detección de marcas, homografía y flujo Print and Cut
@@ -206,3 +211,10 @@ cámara hay que desconectar y volver a conectar (o reiniciar la app).
 Las notas de cada versión están en
 [GitHub Releases](https://github.com/JesPezz/ruida-vision/releases). El diario de
 pruebas con la máquina está en `coplitovs-notas.md`.
+
+---
+
+## Licencia
+
+GPLv3 o posterior (**`GPL-3.0-or-later`**). El texto completo está en
+[LICENSE](LICENSE).

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 JesPezz
+
 """Vision hibrida para laser CO2 con controladora Ruida.
 
 Cenital (coarse) -> marca de registro en mm via homografia.

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 JesPezz
+
 """App de escritorio (GUI) del sistema de vision hibrida.
 
 La logica (camaras, homografia, marcas, movimiento) NO esta aqui: se reutiliza

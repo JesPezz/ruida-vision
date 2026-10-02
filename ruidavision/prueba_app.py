@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 JesPezz
+
 """Prueba de humo de la GUI: construye la ventana entera y la cierra.
 
 No toca camaras ni la Ruida (eso necesita la maquina). Lo que comprueba es lo

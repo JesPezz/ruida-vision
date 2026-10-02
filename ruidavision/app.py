@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 JesPezz
+
 """Ruida Vision: app de escritorio del sistema de vision hibrida.
 
 Esta capa NO calcula nada: las camaras, la homografia, las marcas y el
