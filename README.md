@@ -521,6 +521,14 @@ que `move_and_wait` ya no aborta a la primera lectura perdida: aguanta varias, e
 (`max(timeout, distancia/3 + 30)`, con 3 mm/s de margen, muy por debajo de los
 >300 mm/s reales).
 
+`lb_abre.pcap` (raíz del repo) es esa captura: 408 paquetes UDP entre la controladora
+(192.168.1.50) y el PC (192.168.1.243), puertos 50200 y 40200. Es un pcapng
+**saneado**. Se quedan las MACs y esas dos IP, que sin ellas el análisis de la
+sesión no se puede ni repetir, y la red es privada. Fuera el GUID de la interfaz
+NPF, la versión del Windows, el modelo de CPU y la fecha real (los intervalos sí:
+159,713 s). Los **payloads están byte a byte como se capturaron**: son la evidencia,
+y con ellos se lee el preámbulo de tres paquetes.
+
 El 50207 sí mueve, con teclas de jog. Tabla medida en esta máquina, que es la
 opuesta a la documentación:
 

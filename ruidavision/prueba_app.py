@@ -411,7 +411,12 @@ def main():
         app.vivos[app.i_marcas][0] is None
         and getattr(app.im_marcas_head, "img", None) is not None
         and app.im_marcas_head.winfo_width() >= 320
-        and app.im_marcas_head.winfo_height() >= 100)
+        # El alto sale del reparto de la rejilla (alto=6), no de un numero: un
+        # minimo en pixeles solo valia al 100% de DPI y salia con 78. Lo que se
+        # persigue es que sea una franja y no una linea, y eso si se comprueba
+        # sin depender del escalado.
+        and app.im_marcas_head.winfo_height()
+        >= app.im_marcas_head.winfo_width() // 5)
     # El reparto de los cuatro: los dos visores en vivo, la foto congelada y la
     # tabla de puntos. Medianamente era un PanedWindow con la izquierda al 75% y
     # la foto encima de las camaras, y el reparto salia como salia. Ahora es
@@ -426,10 +431,12 @@ def main():
     altos = sorted({c[1] for c in celdas})
     # 1 px de margen: la rejilla reparte el hueco sobrante en enteros y a una
     # fila le toca uno mas. Lo que se persigue es que no haya una franja
-    # ilegible, no el pixel exacto.
+    # ilegible, no el pixel exacto. El suelo tampoco puede ser un numero de
+    # pixeles (salen 204 con el escalado de este PC): que no se haya collapsed
+    # ninguna celda es lo que se puede comprobar en cualquier DPI.
     chk("los cuatro elementos de Calibrar miden lo mismo %s" % (celdas,),
         anchos[-1] - anchos[0] <= 1 and altos[-1] - altos[0] <= 1
-        and min(anchos[0], altos[0]) > 210)
+        and min(anchos[0], altos[0]) > 100)
 
     # Los botones llevan su nombre encima, no un icono. Se probaron los iconos
     # con tooltip y estorbaban: con la ventana estrecha habia que adivinar.
