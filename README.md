@@ -1,701 +1,208 @@
-# Sistema de Visión Híbrido para láser CO₂ (Ruida RDC7132G)
+# Ruida Vision — visión híbrida para láser CO₂ (Ruida RDC7132G)
 
-Posiciona y alinea marcas de registro (Print and Cut) usando dos cámaras USB IMX179:
-**cenital** (coarse, en la tapa) + **cabezal** (microscopio, ajuste fino), hablando con
-la controladora por UDP y dejando el terreno preparado para LightBurn.
+Posiciona y alinea **marcas de registro (Print and Cut)** con dos cámaras USB
+IMX179: una **cenital** en la tapa (visión general de la cama) y otra en el
+**cabezal** (microscopio, ajuste fino). Habla con la controladora por UDP y deja
+las coordenadas listas para pegarlas en LightBurn.
+
+El PC que ejecuta la app es el mismo al que están enchufadas las cámaras y debe
+estar en la red de la Ruida. No hay Raspberry en este proyecto.
 
 ```
-ruida.py          capa de red: mover el cabezal y leer su posición real (sin dependencias)
+ruida.py          red: mover el cabezal y leer su posición real (sin dependencias)
 hybrid_vision.py  cámaras, detección de marcas, homografía y flujo Print and Cut
-calib.json        se crea solo en `calibrate` (cámaras, FOV, homografía H, puntos)
+ruidavision/      la app de escritorio (Tkinter); se arranca con ruidavision.app
+calib.json        se crea solo en `calibrate`: cámaras, FOV, homografía H, puntos
 ```
 
-## Movimiento a las marcas
+---
 
-**Mover 1 / Mover 2 usa el comando nativo de posición observado en LightBurn**,
-no el jog manual por teclas. Una captura local `ruida_lan_clean.pcap` registró
-`D9 10 00 <X de 5 bytes><Y de 5 bytes>` en UDP 50200. Tres pares decodificados
-coincidieron exactamente con destinos introducidos en LightBurn (183.010,
-80.000), (199.740, 349.280) y (419.960, 349.278) mm; el usuario confirmó que
-el cabezal llegó a ellos. `ruida.py` reproduce ese datagrama, restringe las
-coordenadas a 0..500 × 0..400 mm y verifica la llegada con la posición del panel
-50207. Los opcodes `0x88`/`0x89` sueltos y las teclas simultáneas no son
-equivalentes a este comando.
-
-El viaje nativo **no se puede cancelar desde la aplicación ni desde el botón
-Stop de LightBurn**; el controlador termina el desplazamiento solicitado.
-Print and Cut avanza un punto por pulsación para que el operador pueda revisar
-cada llegada. Durante un viaje, la app advierte que **Parar no lo interrumpe**
-y bloquea el cierre; deja libre la trayectoria y usa el paro físico de la
-controladora ante una emergencia. Cierra LightBurn antes de mover: ambos
-programas usan el puerto local 40200.
-
-`Origen 0,0` usa el mismo viaje nativo con destino fijo (0, 0), comprueba la
-llegada y bloquea nuevos viajes si queda sin confirmar. No es cancelable desde
-la app. `Estacionar` en Calibrar y **Detectar y centrar los 2** siguen
-deshabilitados; el jog manual permanece en 50207. Antes de probar, verifica que
-el láser esté deshabilitado y deja despejada la trayectoria.
-
-El comando `D9 10` no incluye una velocidad, pero **su ritmo sí depende de lo que se
-mande antes**: LightBurn precede cada Go con tres paquetes (`c9`, `c6 01`, `c6 21`) y
-con ellos el viaje sale a más de 300 mm/s; sin ellos la controladora lo ejecuta a
-~10 mm/s. Los bytes del `D9` son correctos byte a byte, luego la diferencia está solo
-en el preámbulo. La app los manda (`Ruida.PREGO`); no se acelera con `set_param`,
-que no cambia nada. Si aun así el ritmo parece anormal, comprueba el estado de la
-máquina con LightBurn antes de continuar; un timeout de confirmación no significa
-que el movimiento se haya detenido.
-
-En **Calibrar** hay un pad compacto de jog direccional (toque = paso; mantener =
-continuo), ajuste del paso con rueda en saltos de 0.5 mm, acceso para conectar
-cámaras y visores en vivo cenital/cabezal. Tras congelar una foto cenital se
-pueden variar el umbral (`0` usa Otsu) y el área mínima y aplicar de nuevo el
-detector a esa misma foto. **Print and Cut** también ofrece el jog y un visor en
-vivo ampliado del cabezal (panel lateral de 360 px, con retícula central
-resaltada) junto a la foto de detección. Los controles del detector afectan
-solo a la ayuda visual de Calibrar: no cambian Print and Cut ni guardan ajustes
-globales. La captura reconecta las cámaras que estaban activas incluso si falla.
-
-En la última prueba física, **Mover 1 alcanzó la primera marca**, pero no quedó
-centrado como se esperaba; hay que repetir la calibración y revisar la homografía
-y el offset antes de atribuirlo al movimiento. El detector también clasificó la
-segunda marca fuera del área segura. Investigar la coordenada, ROI y calibración
-sin relajar los límites de viaje. El detalle de cada prueba con la máquina está
-en `coplitovs-notas.md`, que es el diario de campo.
-
-La detección resalta las mismas coordenadas/píxeles seleccionados por el
-detector con retículas grandes y numeradas; el registro indica cuántas se
-dibujaron y sus píxeles. Al probar desde el código, abre
-`py -3 -m ruidavision.app` desde la raíz del repositorio y revisa
-`%LOCALAPPDATA%\Ruida Vision\app.log`.
-
-## Qué cambió en la v2.0
-
-Nueve commits que salieron de usar la v1.9 con la máquina delante. Los cuatro
-primeros son de movimiento, los cinco de la ventana:
-
-- **`Mover 1 / Mover 2` y `Origen 0,0` viajan con el comando nativo de
-  posición.** Ya no son el jog simulado por teclas: `ruida.py` reproduce el
-  datagrama `D9 10` que se capturó de LightBurn, recorta las coordenadas a la
-  mesa (0..500 × 0..400 mm) y **confirma la llegada** por la posición del panel
-  antes de dejar mover el siguiente punto. Si no llega, lo dice con el error en
-  milímetros y bloquea el viaje. El viaje no se puede cancelar ni desde la app
-  ni desde el Stop de LightBurn: la controladora termina el desplazamiento.
-- **Print and Cut va más rápido en diagonal y no se pasa.** El jog por teclas se
-  quedaba corto en los trayectos largos. Ahora los recorridos se hacen en
-  segmentos XY con temporizador, leyendo la posición entre tramos y haciendo el
-  ajuste final a pulsos cortos; el tiempo por tramo se deduce de la distancia.
-- **La hoja de Marcas se desplaza.** El contenido de la hoja vive en un canvas
-  con barra vertical (`Deslizable`), la botonera pasa a dos filas para caber en
-  1200 px, y la rueda del ratón hace scroll saltando los widgets que ya tienen
-  scroll propio (Listbox, Text, Treeview, Entry). Al cambiar de hoja se suelta el
-  jog continuo y el foco vuelve a la ventana: con el WASD pulsado el `KeyRelease`
-  lo recibía la hoja nueva y el cabezal se quedaba andando.
-- **El paso se cambia sin soltar el WASD.** Las teclas `-` y `+` bajan y suben el
-  paso del toque, así que el paso fino se usa mientras se mueve en vez de obligar
-  a soltar la tecla. Los botones de jog son compactos y llevan su nombre escrito,
-  sin los iconos con leyenda flotante que había que esperar 600 ms para leer.
-- **Calibrar enseña los tres visores a la vez** (las dos cámaras en vivo y debajo
-  la foto congelada) y el visor del cabezal en Print and Cut pasa a 360 px. Marcas
-  ya no sale en negro: al terminar el run enseña `bed.png` con las manchas
-  re-marcadas por el mismo detector.
-- **El estado se ve en color.** La posición del cabezal y el texto de reconexión
-  de las cámaras pasan a verde/rojo: antes un `panel: no contesta` salía en negro
-  igual que una lectura buena.
-- **El registro se lee entero.** El pie lleva barra de desplazamiento y las
-  líneas largas se envuelven en vez de cortarse en el borde.
-- **Los textos largos siguen el ancho de la ventana** y **las barras de botones
-  ya no se salen** en 940 px: todo lo que está en `grid` ahora reparte columnas.
-- **La ventana se ve bien con el escalado de Windows.** La app pide Per-Monitor
-  V2 antes de crear la ventana, de modo que en pantallas al 125-150% los botones
-  y textos ya no se salen. La primera línea del registro dice qué escalado ha
-  quedado.
-- **El panel ya no se pisa a sí mismo.** El socket de posición es uno solo y lo
-  usan a la vez el poll de 3 Hz de la app y el hilo del viaje nativo; el `_drain()`
-  de uno borraba el informe a medio montar del otro y el movimiento moría con
-  *se perdió la lectura de posición durante el movimiento*. Ahora las lecturas
-  y los envíos van con un cerrojo (`Panel._lock`), así que el poll espera a que
-  termine la del viaje en vez de destrozarla.
-
-## Qué cambió en la v1.9
-
-Cuatro cosas que salieron de usar la v1.8 con la máquina delante:
-
-- **La actualización se mira sola al arrancar.** El botón `Buscar actualizaciones`
-  desapareció: estaba en el pie, no se veía y nadie lo pulsaba, así que las
-  versiones nuevas solo llegaban a quien se acordaba. Ahora la app consulta GitHub
-  a los 0,8 s de abrirse (cuando las cámaras ya están en marcha) y avisa en el pie;
-  instalar sigue siendo cosa tuya, con el mismo aviso de siempre.
-- **Calibrar reparte la hoja en cuatro celdas iguales.** Los dos visores en vivo,
-  la foto congelada y la tabla de puntos van en una rejilla 2×2 con filas y
-  columnas del mismo peso: los cuatro miden exactamente lo mismo (574 px de ancho
-  en ventana de 1200). Antes era un `PanedWindow` con la izquierda al 75%, la foto
-  encima de las cámaras y la tabla en una franja.
-- **Fuera el botón `Estacionar` de Vivo.** Hacía lo mismo que `Origen 0,0`: la
-  posición de estacionamiento es (20, 20) y el origen (0, 0), 20 mm de diferencia
-  que no cambian nada. Queda `Origen 0,0`. En Calibrar sigue el `1. Estacionar` de
-  la rutina de calibración, que sí es un paso con nombre propio.
-- **Print and Cut vuelve a enseñar las marcas.** Los dos puntos detectados se
-  dibujaban en verde sobre la foto y la lista de coordenadas se llenaba… hasta que
-  un doble desempaquetado lo reventaba en silencio: `marcas_utiles` ya devuelve
-  píxeles y `_fin_marcas` los volvía a abrir por `(mm, px)`. Salía una lista de
-  números sueltos, `_pintar_marcas` fallaba al abrir el primero y se caían **la
-  marca verde y la lista a la vez**, con un error solo en el registro. El botón
-  `Todo de una vez` pasa a llamarse `Detectar y centrar los 2` para que se lea lo
-  que hace: estaciona, mira la cama, lleva el cabezal a cada marca y la recentra
-  (el estacionamiento es lo que parece "recorrer las esquinas"; las marcas, no).
-
-## Qué cambió en la v1.8
-
-- **Los botones vuelven a llevar su nombre.** En la v1.7 se les puso icono con leyenda
-  flotante y fue mala idea: para saber qué hacía un botón había que parar el ratón y
-  esperar medio segundo, y en mitad de un trabajo eso no pasa. Los nombres van en dos
-  filas donde no caben en una, para que ninguno quede fuera de la ventana.
-
-## Qué cambió en la v1.7
-
-Siete ajustes que salieron de usar la v1.6 con la máquina delante:
-
-- **El paso se pide en milímetros, no en nombres.** `-` y `+` lo suben y lo bajan
-  en saltos de **0,1 mm** entre 0,1 y 10, y el número se ve siempre junto al
-  botón, como en LightBurn. Desapareció el desplegable: pulsabas `-` con la mano
-  en el teclado y tenías que soltar WASD para tocarlo. La Ruida, en cambio, solo
-  entiende pulsos: `ms_de_paso()` traduce mm a
-
-  milisegundos de pulsado con los tres puntos medidos (0,2 / 0,44 / 3,4 mm) y un
-  mínimo de 1 ms, por debajo del cual la controladora no distingue el pulso.
-- **Los botones llevan su nombre encima**, sin iconos: se probó con icono y leyenda
-  flotante y había que parar el ratón y esperar medio segundo para saber qué hacía
-  cada uno. Los nombres se reparten en dos filas donde no caben en una.
-- **Calibrar reparte la hoja**: las dos cámaras en vivo ocupan la parte de arriba
-  y la foto congelada, la de abajo, en una fila a todo lo ancho. Antes la
-  congelada se comía la hoja y las cámaras en vivo salían en una franja.
-- **Solo se marcan los puntos que están en la cama.** Las manchas que caen fuera
-  del área de trabajo (500 × 400 mm) son tags de calibración o reflejos: se
-  cuentan y se dicen, pero no se marcan, y **el filtro es el mismo en la app y en
-  `hybrid_vision.py`** (`marcas_utiles`). Es lo que evita que el par elegido sea un
-  tag y una mancha del borde en vez de las dos marcas del material.
-- **Print and Cut sin copiar y pegar.** Con los dos puntos a la vista, el botón
-  `Mover` va al primero; se anota a mano la posición que da el cabezal; vuelve a
-  pulsar y va al segundo. El paso 2 avisa de que el offset de LightBurn debe
-  quedar **desactivado**, porque aquí ya se ha tenido en cuenta.
-- **La actualización se ejecuta de verdad.** Descargar el `.exe` ya no se quedaba
-  en el disco: la app se cierra (`/CLOSEAPPLICATIONS`), espera a salir y arranca el
-  instalador (`actualizar.lanzar`, con `DETACHED_PROCESS` para que no se quede
-  colgada esperando).
-
-## Qué cambió en la v1.6
-
-Lo que se arregló en esta versión, todo a raíz de la usar en la máquina:
-
-- **Las teclas `-` y `+` cambian el paso del toque** sin soltar el WASD. El paso
-  fino se usa justo mientras se está moviendo, y hasta ahora había que soltar la
-  tecla para ir al desplegable. Sigue estando el desplegable, que va a la par.
-- **Calibrar enseña los tres visores a la vez**: las dos cámaras en vivo (con la
-  cruz del cabezal y la caja de viaje) y, debajo, la foto congelada con las manchas
-  en verde. Antes la cámara en vivo y la congelada compartían un mismo lienzo, así
-  que solo se veía una de las dos.
-- **Marcas (Print and Cut) ya no sale en negro.** Al terminar el run se ve lo que
-  vio el detector — la foto de la cama con las manchas marcadas — al lado de la
-  lista de coordenadas, y arriba hay dos líneas de cómo se usa la pestaña. Se puede
-  comprobar si ha detectado 2 manchas o 20 antes de tocar nada.
-- **Ajustar los puntos ya no dice "Error de reproyeccion"** cuando el ajuste es
-  bueno. Ahora dice "residuo del ajuste", y recuerda que 0,1–0,2 mm es lo normal.
-  (Lo del residuo va en el registro y en el mensaje de la propia pestaña.)
-- **Arreglado el `WinError 10048` que rompía la pestaña Marcas.** El panel de la
-  Ruida escucha en un puerto fijo (40207) y el run de marcas abría un segundo en el
-  mismo puerto: `bind()` fallaba, el run se caía sin escribir `coords.txt` y la
-  pestaña se quedaba en "sin coordenadas: mira el registro de abajo". Ahora la app
-  suelta su panel antes de arrancar el cálculo, y lo vuelve a abrir después.
-
-## Qué cambió en la v1.5
-
-Lo que se arregló en esta versión, con lo medido en esta máquina:
-
-- **El OTA no descargaba nada.** `actualizar.py` pedía la release y luego escribía el
-  fichero con una ruta relativa al directorio del ejecutable, que en Windows bajo
-  `Program Files` no existe: `PermissionError` y descarga a medias. Ahora descarga a
-  `%TEMP%` con ruta absoluta, y **solo** cierra la app si la descarga se ha podido
-  abrir. Sin cambios en la API ni en el repo (siguen sin token, y el repo es público
-  a propósito: contra un repo privado la API devuelve 404 aunque exista la release).
-- **Las cams tardaban 8 s en abrir y iban a 2 fps.** No era hardware: `cap.set(FOURCC)`
-  después de abrir deja el driver en YUY2. Pedir MJPG + resolución + fps en el
-  constructor: 0,9 s y 24,9 fps. Ver "Las cámaras: el MJPG hay que pedirlo al abrir".
-- **Origen y destinos iban a tirones.** En la v1.5 `move_to` era todo pulsos de 100 ms
-  (3,4 mm) con una lectura de posición en medio: una rampa de aceleración por cada
-  3,4 mm. Esa versión pasó a jog continuo por eje (~5 mm/s), pero el corte basado
-  en lecturas podía llegar tarde. Después se probaron teclas simultáneas, pero los
-  desplazamientos físicos no fueron interpolados ni fiables. Una captura de LightBurn
-  reveló el comando nativo a coordenadas que usa ahora Print and Cut; ver
-  "Movimiento a las marcas".
-- **En Calibrar, la cámara en directo y la foto.** Al entrar en la pestaña se ve la
-  cámara en directo en el visor, y el botón se llama **Congelar foto**. Con una captura
-  ya congelada, el visor ya no se pisa: el botón pasa a guardar.
-- **Numerar las manchas de calibración.** La columna "n" de la tabla de Calibrar es
-  el número de verdad, no el orden de la lista: se puede renumerar a mano
-  ("Cambiar n°"), "Renumerar" ordena por número y renumera 1..N, y `cal_ajusta`
-  empareja cada número con su punto **por ese número**, no por posición. Apuntar 70
-  manchas de un tirón ya no obliga a dejarlas en orden de captura.
-
-## Dónde corre
-
-En **el PC Windows al que están enchufadas las dos IMX179 por USB** (cenital en la
-tapa, cabezal/microscopio). No hay Raspberry en este proyecto. La controladora
-Ruida se alcanza por la LAN del PC, así que ese PC tiene que estar en la misma
-red que ella.
-
-`opencv-python` en Windows usa DirectShow (`CAP_DSHOW`) para las cámaras USB, con
-recurso a `CAP_ANY`. Los índices de cámara se numeran por orden de conexión, así que
-**cualquier otro dispositivo USB que se enumere se cuela en la numeración**. En esta
-máquina hay tres: las dos IMX179 y la cámara del Galaxy A56 que expone **Enlace de
-Windows / Phone Link** como dispositivo virtual.
-
-Índices detectados (verificar con `scan` si se cambia algo):
-
-| índice | cámara | config |
-|---|---|---|
-| 0 | IMX179 del cabezal (microscopio) | `head_cam` |
-| 1 | Galaxy A56 vía Enlace de Windows — **descartada** | — |
-| 2 | IMX179 cenital (tapa) | `top_cam` |
-
-```bash
-py hybrid_vision.py scan      # abre cada indice, dice la resolucion real y
-                              # guarda scan_idx<N>.png para identificarlo a ojo
-```
-
-Si desconectas el Galaxy, los índices se recomponen: vuelve a pasar `scan` y actualiza
-`top_cam` / `head_cam` en `calib.json`. Para probar sin editar nada:
-`py hybrid_vision.py cams --top 2 --head 0`.
-
-## Instalación
+## Instalación y arranque
 
 ```bash
 pip install -r requirements.txt
-python hybrid_vision.py test        # autocomprobado, no toca la máquina
+python hybrid_vision.py test      # autocomprobado, no toca la máquina
 ```
 
-`test` valida el protocolo (vectores dorados, swizzle, informe de posición) más la
-homografía y la detección sintéticas. Si pasa, la parte que no depende del vídeo está bien.
+`test` valida el protocolo (vectores, swizzle, informe de posición) y la
+homografía/detección sintéticas. Si pasa, lo que no depende del vídeo está bien.
 
-Para abrir la app desde el código en Windows:
+Abrir la app desde el código (Windows):
 
 ```powershell
 py -3 -m ruidavision.app
 ```
 
-La app instalada y la lanzada desde el código reutilizan
-`%LOCALAPPDATA%\Ruida Vision\calib.json` cuando existe. Así se conserva la calibración
-de la instalación al ejecutar la versión del repositorio. Si no hay calibración de
-usuario, la versión de código usa `calib.json` junto a `hybrid_vision.py`. La ruta
-activa aparece en el registro al abrir la ventana.
-El registro de la app se guarda en `%LOCALAPPDATA%\Ruida Vision\app.log` cuando hay
-datos de usuario activos; el botón **Ver registro** abre ese archivo.
+La app **mira si hay versión nueva al arrancar** (a los ~0,8 s) y avisa en el
+pie; instalar sigue siendo cosa tuya. La instalación y la versión de código
+comparten `%LOCALAPPDATA%\Ruida Vision\calib.json` cuando existe. El registro
+está en `%LOCALAPPDATA%\Ruida Vision\app.log` (botón **Ver registro**).
 
-## Paso 0 — el número mágico (hazlo una vez, antes de mover nada)
+Índices de cámara (pueden cambiar si se conecta algo nuevo; confírmalos con
+**Buscar cámaras** / `py hybrid_vision.py scan`):
 
-La controladora fuezia con un byte "magic" al principio de cada comando de movimiento.
-El valor correcto no está documentado para la 7132G, así que hay que deducirlo:
+| índice | cámara | config |
+|---|---|---|
+| 0 | IMX179 del cabezal (microscopio) | `head_cam` |
+| 1 | Galaxy A56 vía Enlace de Windows — descartada | — |
+| 2 | IMX179 cenital (tapa) | `top_cam` |
 
-1. En LightBurn o RDWorks crea un trabajo mínimo (un cuadrado pequeño) y guárdalo
-   como `.rd`.
-2. Deduce el magic:
+Si desconectas el Galaxy, los índices se recomponen: vuelve a pasar `scan` y
+actualiza `top_cam` / `head_cam` en **Ajustes**. Para probar sin editar nada:
+`py hybrid_vision.py cams --top 2 --head 0`.
+
+---
+
+## Manual de usuario
+
+La ventana tiene cuatro pestañas: **Vivo**, **Calibrar**, **Marcas (Print and
+Cut)** y **Ajustes**.
+
+### Vivo
+
+Vista de las dos cámaras y los controles de movimiento manual.
+
+- **Conectar cámaras** / **Desconectar**: abren o cierran las dos cámaras.
+- **Buscar cámaras**: lista los índices detectados (útil si cambian).
+- **Parar**: suelta las cuatro teclas del panel y corta el jog. **No detiene el
+  viaje nativo a coordenadas** (ver *Puntos clave*).
+- **Origen 0,0**: viaje nativo al origen (esquina inferior izquierda).
+- **paso (toque)**: con los botones `−` / `+` (o las teclas `-` / `+`) cambias el
+  paso sin soltar el WASD. Un **toque** da ese paso; **mantener** mueve en continuo.
+
+### Calibrar
+
+Aquí se calcula la homografía (la relación píxel de la cenital ↔ milímetros de
+la máquina) y se revisan los visores.
+
+- **1. Estacionar**, **Congelar foto**, **Borrar puntos**, **Quitar punto**,
+  **2. Ajustar H**, **3. Medir FOV**, **4. Offset laser** recorren la rutina.
+- Con una foto congelada puedes cambiar **Umbral** (`0` = Otsu) y **Área
+  mínima**, y **Aplicar en foto**. Estos controles solo afectan a la ayuda
+  visual de esta pestaña: no cambian Print and Cut.
+- La hoja enseña a la vez las dos cámaras en vivo y la foto congelada.
+
+**Calibrar la homografía** (con el láser apagado y la cama vacía):
 
 ```bash
-py ruida.py magic C:\ruta\al\archivo.rd
+python hybrid_vision.py calibrate --points 6
 ```
 
-**Resultado en esta máquina: `0x88`**, que es el valor por defecto, así que no hace
-falta pasar `--magic` nunca. Verificado sobre un `Default.rd` de RDWorks de 21503
-bytes: 0x88 des-swizzleado da un 28.0% de bytes `0x00` (padding), y el siguiente magic
-se queda en 8.8%. Los dos viajes absolutos del fichero decodifican a 328.007 ×
-133.240 mm, coordenadas de cama plausibles.
+Por cada punto: mueve el cabezal a una referencia con **WASD**, pulsa **Enter**
+(el script lee la posición real de la Ruida), el cabezal se aparta solo y haces
+**clic en el centro de la marca** en la foto cenital. Con 4+ puntos bien
+repartidos (esquinas incluidas) calcula `cv2.findHomography` con RANSAC.
 
-Cómo lo decide (por si hay que repetirlo en otra controladora): en un `.rd` real el byte
-más frecuente es `0x00`, y solo el magic correcto lo devuelve a cero. **No se cuentan
-opcodes a propósito**, porque `swz(0x00, 0x88) == 0x89`: el padding se serializa justo
-como el opcode de viaje relativo, y hay 7 magics que lo mapean a un opcode, así que
-cualquier recuento de opcodes se autoengaña. Ese error costó tres versiones de la
-heurística antes de cazarlo con un `.rd` real.
+- **Si el error supera 1 mm, repite**: 0,1 mm de error aquí es 0,1 mm en cada
+  marca. El error se mide solo sobre los puntos que RANSAC acepta; los
+  descartados se cuentan aparte y no se guardan.
+- Sin informe de posición: `--manual` para escribir X Y a mano.
 
-Anótalo igualmente y úsalo siempre: `--magic 0xNN` (o en el `calib.json`).
+Antes de calibrar, dos comprobaciones de una sola vez:
 
-Si **ninguno** destaca, para y no muevas el cabezal: significaría que el `.rd` no
-tiene viajes o que no es de RDWorks para un 7132G. Prueba otro `.rd`.
+- **Número mágico** (`py ruida.py magic archivo.rd`): en esta máquina el valor
+  correcto es **`0x88`** (el de por defecto), así que no hace falta pasar
+  `--magic`. Solo hay que repetir el paso si se cambia de controladora.
+- **Origen de la Ruida**: fíjalo en la **esquina inferior izquierda de la cama**
+  y **no lo muevas** entre calibrar y cortar. La homografía incluye ese desfase.
 
-## Paso 1 — el origen de la Ruida
-
-Las coordenadas absolutas del cable son **enteros sin signo de 5 bytes** (µm). No
-admiten negativos, así que:
-
-- Fija el origen en la **esquina inferior izquierda de la cama**.
-- **No lo cambies** entre la calibración y el uso, ni muevas la máquina con los
-  pulsadores después de calibrar. Si el origen cambia, las coordenadas quedan
-  desplazadas y el corte sale desplazado.
-- La homografía calibrada incluye ese desfase; si lo tocas, recalibra.
-
-## Paso 2 — comprobar la red
+Comprobar la red:
 
 ```bash
 ping -c3 <IP>          # red y ruta
 python ruida.py ping   # handshake 50207 + 5 posiciones reales
 ```
 
-`ping` correcto = ves coordenadas que cuadran con lo que pone LightBurn. Si no
-responde nada: firewall, o la tarjeta en otra IP/subred (esta subred es fija por DHCP).
+`ping` correcto = coordenadas que cuadran con LightBurn. El canal 50207 no manda
+nada solo: responde a un `0xCC` con el informe `A5 68` pegado.
 
-**El canal 50207 no manda informes por su cuenta.** Solo responde a un `0xCC`, y su
-contestación viene con el informe `A5 68` pegado. Por eso `position()` pregunta cada
-vez antes de esperar, y `handshake()` guarda el informe en vez de tirarlo. Sin las dos
-cosas el canal parece mudo: es un fallo de lectura de posición, no de red.
+### Marcas (Print and Cut)
 
-Medición real en esta máquina (7132G, magic `0x88`): en reposo el cabezal reporta
-`(18.576, 0.0) mm`. Ten en cuenta que son coordenadas de la **máquina**, no de la
-cámara.
+1. **Detectar los dos puntos**: foto cenital, descarta lo que cae fuera de la
+   cama y elige las dos manchas de mayor área.
+2. **Mover** (luego *Mover 1* / *Mover 2*): lleva el cabezal a cada marca con el
+   viaje nativo y confirma la llegada. Se anotan a mano las coordenadas que da
+   el cabezal.
+3. **Detectar y centrar los 2**: hace todo seguido —estaciona, mira la cama,
+   lleva el cabezal a cada marca y la recentra.
 
-## Paso 3 —ajuistar el movimiento (con el láser apagado y la cama vacía)
+Marca **2 puntos** y deja el **offset de LightBurn desactivado**: aquí ya se ha
+tenido en cuenta. Escribe las coordenadas con **Obtener coordenadas** en
+LightBurn y corta desde ahí.
 
-```bash
-python ruida.py move 100 100   # pide confirmación interactiva
-python ruida.py jog 2 -1
-python ruida.py sniff          # vuelca el tráfico 50207 en crudo
-```
-
-Si `move` mueve a coordenadas que no cuadran, casi siempre es el magic. Vuelve al
-paso 0.
-
-## Paso 4 — calibrar la homografía
-
-```bash
-python hybrid_vision.py cams        # ceital | cabezal, q para salir
-python hybrid_vision.py calibrate --points 6
-```
-
-El script pide, N veces:
-
-1. Mueve el cabezal a un punto de referencia **con W A S D** (o a mano con el mando
-   de LightBurn).
-2. Enter → el script lee la (X, Y) real de la Ruida.
-3. El cabezal se va al **estacionamiento** para despejar la vista de la cámara cenital.
-4. Clic en el píxel de la marca en la foto.
-
-Con 4+ puntos bien repartidos (las 4 esquinas de la cama y alguna intermedia) calcula
-`cv2.findHomography` con RANSAC y guarda el error de reproyección. **Si el error máximo
-sale de 1 mm, no sigas**: mide los puntos con más precisión, quita reflejos o repite.
-Un 0.1 mm de error en la homografía es un 0.1 mm de error en cada marca.
-
-**El error que se informa es solo sobre los puntos que RANSAC acepta.** RANSAC
-descarta los que no cuadran —típicamente un clic en la marca de al lado— y el
-informe los cuenta aparte, uno a uno, en vez de contaminar la media. Los puntos
-descartados **no se guardan**, para que la siguiente calibración no los vuelva a
-meter. Medir también sobre los descartados es lo que hacía que una calibración
-buena (5 puntos a 0.8 mm) se anunciara como un desastre de 477 mm.
-
-Sin informe de posición de la Ruida: `--manual` para escribir X Y a mano.
-
-## Paso 5 — flujo Print and Cut
+Para validar la homografía sin mover nada: `run --no-move`.
 
 ```bash
 python hybrid_vision.py run --marks 2 --debug --emit coords.txt
 ```
 
-1. Cabezal al estacionamiento, foto general de la cama.
-2. Detecta las manchas, descarta las que proyectan fuera de la cama y elige la
-   pareja con los **componentes de mayor área**; la distancia desempata. Así un
-   reflejo pequeño dentro de la zona segura no reemplaza una marca real solo por
-   estar más lejos.
-3. Por cada marca: mueve el cabezal allí y entra en el lazo de centrado fino.
-4. Imprime las coordenadas finales y las deja en `coords.txt`.
+### Ajustes
 
-### La caja de la máquina es la ROI por defecto
+IP de la Ruida, índices de las cámaras, estacionamiento, FOV del cabezal, marcas
+a detectar, umbral, área mínima y desplazamiento. Al cambiar el índice de una
+cámara hay que desconectar y volver a conectar (o reiniciar la app).
 
-`run` descarta toda marca que la homografía proyecte **fuera de la caja de la
-máquina** (`Panel.SAFE`, 0-500 x 0-400 mm), e imprime cuáles eran. No es
-cosmético: una homografía ajustada con puntos en una zona **extrapola** mal
-fuera de ella, y un tag de calibración cerca del borde sale en milímetros que no
-existen. Moverse a uno de esos es un `ValueError`, y si el soft limit fuera mayor
-sería el cabezal contra un tope de recorrido.
+### Controles de movimiento
 
-Si al filtrar quedan menos de las dos marcas pedidas, el motivo suele ser tags de
-calibración de por medio: se acota con `--roi x0,y0,x1,y1` en mm. Y si lo que
-sobra está **fuera** de la caja, la homografía extrapola mal ahí: repite
-`calibrate` con puntos repartidos por **toda** la cama, esquinas incluidas. Una
-homografía solo es fiable dentro de la región donde se midió.
+- **W A S D** (no las flechas): un paso por pulsación. `v` cambia el tamaño del
+  paso. Abajo es `S` porque el origen está en la esquina inferior izquierda.
+- **`-` / `+`**: suben/bajan el paso del toque.
+- El jog manual usa las teclas del panel (50207). Fuera de la app se prueba con
+  `python ruida.py move 100 100`, `python ruida.py jog 2 -1` y
+  `python ruida.py sniff`.
 
-El bucle de ajuste fino mide el desplazamiento marca↔centro de imagen en la cámara
-del cabezal, lo convierte a mm con `head_fov_mm` y mueve el cabezal en sentido
-contrario hasta el punto absoluto calculado, con `goto_native` (viaje nativo
-completo; el `move_to` de pulsos de teclado iba a 10 mm/s y el lazo no llegaba).
-Repite hasta estar a `--tol` o `--iters` iteraciones. Busca en el frame entero, no
-en el centro: si el tag no cae en la caja central no hay corrección posible, y un
-tag grande se salía del tope de área con el mensaje engañoso de "no veo la marca".
+---
 
-Ojo al `--tol`: el paso mínimo del teclado de jog es ~0.2 mm, así que **0.1 mm es
-la tolerancia que converge de forma fiable** (medido: los 4 objetivos de prueba
-entre 0.075 y 0.144 mm, en 6-15 s). Con `--tol 0.05` el lazo no resuelve el último
-0.2 mm, se queda paseando y agota el presupuesto: 2 de 4 lo alcanzan y los otros 2
-tardan 41 s. Para registro de print-and-cut, 0.1 mm sobra.
+## Puntos clave
 
-**Ojo con el signo de la cámara del cabezal.** Puede ir girada o espejada respecto a
-los ejes de la máquina, y no hay forma de saberlo hasta mirarlo: si está mal, cada
-iteración aleja la marca en vez de acercarla. Se comprueba en la primera pasada
-(fase 1, láser apagado, `--iters 1`): mira la línea que dice `offset`. Si al hacer
-jog la marca se aleja, pon `head_flip_x: -1` (y/o `head_flip_y: -1`) en `calib.json`.
-Con el ajuste correcto el offset debe decrecer en cada línea de log.
+- **El viaje a las marcas usa el comando nativo** `D9 10 00 <X><Y>` por UDP
+  50200 (el mismo que LightBurn *Move to Position > Go*), y confirma la llegada
+  por la posición del panel 50207. Las coordenadas se recortan a la mesa
+  (0..500 × 0..400 mm).
+- **Ese viaje no se puede cancelar** ni desde la app ni desde el Stop de
+  LightBurn: la controladora termina el desplazamiento. Ante una emergencia, usa
+  el paro físico. Deja la trayectoria despejada y el láser deshabilitado.
+- **La velocidad del viaje la fija el preámbulo** (`Ruida.PREGO`: `c9`, `c6 01`,
+  `c6 21`), no el `D9`. Con preámbulo va a más de 300 mm/s; sin él, a ~10 mm/s.
+  No se acelera con `set_param`, que no cambia nada.
+- **Cierra LightBurn antes de mover**: el 50200 usa el puerto origen 40200, el
+  mismo que RDWorks. El 50207 usa el 40207.
+- **No combines teclas** para movimiento automático: dos teclas a la vez no dan
+  una trayectoria interpolada fiable.
+- **Las cámaras hay que abrirlas pidiendo MJPG** (fourcc + resolución + fps en el
+  constructor). Pedirlo con `set()` después deja el driver en YUY2: 8 s en abrir
+  y 2 fps en vez de 0,9 s y 24,9 fps.
+- **El paso mínimo es ~0,2 mm** (desplazamiento fijo, no latencia). Por eso la
+  tolerancia de centrado fiable es **0,1 mm**, no 0,05.
+- **Marca 0,1 mm de error de homografía como 0,1 mm en el producto**: es la
+  fuente de error principal, seguida de `head_fov_mm`.
 
-Escribe las coordenadas en LightBurn con **Obtener coordenadas** en cada punto de
-registro, y dale a cortar desde ahí.
+### Seguridad
 
-### Cómo se centra el cabezal en cada punto (y por qué no hace falta puntero)
+- Este código **nunca manda órdenes de corte ni de movimiento del eje Z**
+  (no toca `0xA8`/`0xA9`). Mueve la cabeza, no el láser.
+- Potencia, aire o corte se ajustan en LightBurn, no aquí.
+- Prueba siempre con el láser **deshabilitado** y la pieza ya colocada.
+- `run --no-move` calcula coordenadas sin mover nada.
 
-`calibrate` guarda el par *(posición del cabezal) ↔ (píxel donde haces clic)*, así
-que asume que el cabezal está **centrado en la marca** al pulsar Enter. Da igual
-que no haya un puntero superpuesto: la marca centrada en la imagen de la cámara del
-cabezal **es** el puntero, y con 0.0255 mm/px el centrado se juzga a ~0.1 mm con el
-ojo. `calibrate` abre las dos cámaras, así que la del cabezal se usa para eso:
+### Límites conocidos
 
-```
-py hybrid_vision.py calibrate --park 20,20
-```
+- **`find_marks` es "componentes oscuros de área plausible"**: detecta puntos y
+  cruces, pero no distingue un punto de una letra. Si hay falsos positivos,
+  ajusta `--thr`/`min_area` o añade un filtro de redondez.
+- **`head_fov_mm` es una constante**, no una calibración: mídela con `--manual`
+  contra una rejilla conocida si el centrado fino no converge.
+- La escala del cabezal puede ir **girada o espejada**: si jugando al jog la
+  marca se aleja en vez de acercarse, ajusta `head_flip_x`/`head_flip_y` en
+  `calib.json`.
+- Los `ACK`/`RSP` varían por firmware: se aceptan `0xC6`/`0xCC` como ACK y
+  `0x46`/`0xCF` como error.
+- `run` asume que nadie más toca la máquina.
 
-En cada punto, `calibrate` abre **una ventana con las dos cámaras a la vez**:
+---
 
-- **Izquierda, la del cabezal**, con la cruz y el recuadro verde de la ventana de
-  búsqueda dibujados: la marca tiene que quedar centrada en la cruz.
-- **Derecha, la cenital**, para ver el contexto y elegir el siguiente punto, con un
-  círculo rojo en donde está el cabezal ahora (si ya hay homografía guardada).
+## Historial de cambios
 
-**No hace falta LightBurn**: el cabezal se mueve con **W A S D** (arriba, izquierda,
-abajo, derecha), un paso por pulsación, y `v` cambia el tamaño del paso (0.2 / 0.44 /
-3.4 mm, pulsos deadbeat de 1, 20 y 100 ms). Para trayectos largos, `v` hasta el paso
-de 3.4 mm; para el último milímetro, `v` otra vez hasta 0.2 mm. Abajo es `S` porque el
-origen está en la esquina inferior izquierda.
-
-Se usan letras y no las flechas a propósito. Las flechas del teclado llegan partidas
-en dos golpes y el segundo byte no aparece en esta máquina, así que el código las
-recibe como un prefijo suelto y no puede saber hacia dónde apuntabas. Una letra llega
-siempre, en un solo golpe, y da igual el teclado y el idioma. Las flechas siguen
-mapeadas por si en otro equipo llegan enteras, pero **la ruta buena es WASD**.
-
-Da igual dónde esté el foco del teclado. La ventana de OpenCV solo ve las teclas si el
-foco está en ella, y la consola solo las ve si el foco está en la consola; el código
-lee las dos fuentes en cada vuelta y se queda con la primera que conteste, así que
-funciona con la ventana delante y con la consola delante.
-
-Si alguna vez sale en pantalla `tecla 0x... (…) sin asignar`, ese es el código crudo
-de una tecla que no está en la tabla: el número es justo lo que hay que mirar para
-añadirla.
-
-Pulsas **Enter** cuando la marca está centrada, y entonces el código aparta el
-cabezal con `park()`, saca el frame de la cenital y te pide el clic en la marca. Ese
-clic va a 0.26 mm/px, o sea que **1 px de error = 0.26 mm**: haz clic en el centro de
-la mancha, no en el borde. `q` sale en cualquier momento.
-
-Dos ventanas por un motivo: la compuesta es para **navegar** (saber dónde está el
-cabezal y qué marca elegir de las muchas que hay en la cama) y el frame a pantalla
-completa que sale al pedir el clic es para **apuntar con precisión**, que a media
-resolución no sirve. Con `--no-watch` se hace por consola, escribiendo el X Y a mano.
-
-## Jog manual y viaje nativo a coordenadas
-
-**El jog manual usa las teclas del panel 50207.** Los paquetes `0x88` y `0x89`
-sueltos por el 50200 se confirman con un `c6` pero no movieron esta controladora
-en las pruebas previas.
-
-Para un viaje absoluto, la captura de la acción LightBurn **Move > Move to
-Position > Go** muestra `D9 10 00 <X:5 bytes><Y:5 bytes>` por UDP 50200. Tres
-destinos decodificaron exactamente y se confirmó que el cabezal los alcanzó.
-Print and Cut reproduce ese datagrama, recibe el ACK y consulta la posición en
-50207 hasta confirmar llegada. No se han de sustituir esos bytes por `0x88`,
-`0x89` ni por jogs simultáneos.
-
-LightBurn, además, mete **tres paquetes delante de cada Go** — medido con `tshark` en
-el 50200, des-swizzeando y quitando los 2 bytes de checksum — y el `D9` en sí es
-byte a byte el nuestro:
-
-| # | bytes | qué es |
-|---|-------|--------|
-| 1 | `c9 02 00 00 00 00 00` | LightBurn varía aquí el valor (0 o 2500 µm); se manda el de cero, que es el de sus Go rápidos |
-| 2 | `c6 01 00 00` | |
-| 3 | `c6 21 00 00` | |
-
-Esos tres son la diferencia entre **~10 mm/s** (sin ellos) y **>300 mm/s** (con
-ellos), y son `Ruida.PREGO`. El panel además se calla mientras ejecuta el viaje, así
-que `move_and_wait` ya no aborta a la primera lectura perdida: aguanta varias, exige
-**dos** lecturas estables para confirmar y deja el timeout como red de seguridad
-(`max(timeout, distancia/3 + 30)`, con 3 mm/s de margen, muy por debajo de los
->300 mm/s reales).
-
-`lb_abre.pcap` (raíz del repo) es esa captura: 408 paquetes UDP entre la controladora
-(192.168.1.50) y el PC (192.168.1.243), puertos 50200 y 40200. Es un pcapng
-**saneado**. Se quedan las MACs y esas dos IP, que sin ellas el análisis de la
-sesión no se puede ni repetir, y la red es privada. Fuera el GUID de la interfaz
-NPF, la versión del Windows, el modelo de CPU y la fecha real (los intervalos sí:
-159,713 s). Los **payloads están byte a byte como se capturaron**: son la evidencia,
-y con ellos se lee el preámbulo de tres paquetes.
-
-El 50207 sí mueve, con teclas de jog. Tabla medida en esta máquina, que es la
-opuesta a la documentación:
-
-| byte | acción | letra de verificación |
-|------|--------|----------------------|
-| `01` | +X | `jog 2 0` aumenta X |
-| `02` | −X | `jog -2 0` disminuye X |
-| `03` | −Y | `jog 0 -2` disminuye Y |
-| `04` | +Y | `jog 0 2` aumenta Y |
-
-Se manda `A5 50 <tecla>` para pulsar y `A5 51 <tecla>` para soltar.
-La tabla se verificó eje por eje. Una prueba posterior confirmó que mantener
-dos teclas a la vez no da una trayectoria interpolada fiable; no combinar
-teclas para movimiento automático.
-
-### En la GUI: un toque o mantener
-
-En la app (`ruidavision/`) un **toque corto** de la tecla o del botón da un solo paso
-fino (el del cuadro "paso"), y **mantener** pulsado mueve en continuo con `jog_hold`.
-Print and Cut usa el viaje nativo `D9 10`, no pulsaciones temporizadas. Cada tarea de
-máquina corre en su propio hilo, de modo que mantener una tecla **no congela la ventana**.
-
-El botón **Parar** suelta las cuatro teclas del panel y detiene el jog manual. No
-interrumpe el viaje nativo a coordenadas; ante una emergencia usa el paro físico.
-
-El techo del continuo **no es el perfil de LightBurn**: los 5 mm/s de
-"Config maquina jog lento" tampoco describen esta controladora (ver la tabla de abajo:
-100 ms de pulso dan 3,4 mm, no los 0,68 mm que daría 5 mm/s). Lo que sí se puede
-cambiar desde la app es el **viaje nativo**: sin el preámbulo de LightBurn iba a
-~10 mm/s.
-
-### Las cámaras: el MJPG hay que pedirlo al abrir
-
-Poner el fourcc con `cap.set()` **después** de abrir no lo negocia: el driver se queda
-en YUY2 y, a 1080p, son 3,7 MB por fotograma. Medido en esta máquina con la cenital:
-
-| cómo se abre | fourcc real | primer fotograma | fps |
-|---|---|---|---|
-| `cap.set(FOURCC)` después | YUY2 | 8,4 s | 2,2 |
-| MJPG + resolución + fps en el constructor | MJPG | 0,03 s (0,9 s hasta abrir) | 24,9 |
-
-Por eso `open_cam` pasa los tres parámetros a `cv2.VideoCapture(...)` y deja el `set`
-para la exposición y el gain, que sí aceptan el cambio en caliente. Si el constructor
-con parámetros no abre, se cae al camino de antes (abrir y luego negociar), y si el
-frame real no es el pedido lo avisa y usa el real: la homografía se escala por
-`frame/cal` (`_px_de_mm`), así que acertar la resolución no es crítico, pero el
-rendimiento sí.
-
-### La resolución: qué la baja y qué no
-
-Un pulso de `t` ms recorre `~0.18 mm (desplazamiento fijo) + velocidad · t`. Con el
-perfil **"Config maquina jog lento"** (`0x27`/`0x37` = 5 mm/s, `0x28`/`0x38` =
-800 mm/s², subido a la Ruida con LightBurn) queda así:
-
-| pulso | X | Y | (X con el perfil de fábrica) |
-|-------|---|---|------------------------------|
-| 1 ms | 0.200 mm | 0.175 mm | 0.219 mm |
-| 2 ms | 0.213 mm | 0.187 mm | 0.251 mm |
-| 10 ms | 0.302 mm | 0.276 mm | 0.498 mm |
-| 20 ms | 0.441 mm | 0.410 mm | 0.854 mm |
-| 50 ms | 1.045 mm | 1.019 mm | 4.56 mm |
-| 100 ms | 3.403 mm | 3.353 mm | 6.15 mm |
-
-Dos cosas que se aprendieron midiendo, y que no salen de leer la documentación:
-
-1. **Bajar la velocidad no baja la resolución.** El desplazamiento fijo de ~0.18 mm
-   es una distancia, no una latencia: se paga una vez por pulso y siguio igual al
-   bajar la velocidad 3× (0.219 → 0.200 mm en el pulso de 1 ms). El paso mínimo
-   sigue siendo ~0.2 mm. Lo que sí mejora es la seguridad y la velocidad de
-   aproximación: un pulso de 50 ms pasó de 4.56 mm a 1.045 mm.
-2. **El perfil lento además arregla la asimetría entre ejes.** Con el de fábrica X
-   iba a 0.092 mm/ms y Y a 0.045; ahora los dos van a 0.031, así que `JOG_RATE` es
-   un número y no un diccionario por eje.
-
-Como el paso mínimo no baja de 0.2 mm, el `--tol` fiable es 0.1 mm, no 0.05.
-
-### Dónde se cambia la velocidad de jog
-
-En el perfil de máquina de LightBurn, **no en el panel**: el `.lbset` es JSON y trae
-los parámetros **por eje** (`0x2X` = X, `0x3X` = Y). Los del teclado son:
-
-| id | parámetro | valor |
-|----|-----------|-------|
-| `0x27` | Keypad jumpoff speed X (mm/s) | 5 |
-| `0x28` | Keypad acceleration X (mm/s²) | 800 |
-| `0x37` | Keypad jumpoff speed Y (mm/s) | 5 |
-| `0x38` | Keypad acceleration Y (mm/s²) | 800 |
-
-Solo se tocan los del teclado (`Keypad ...`): los de corte (`0x23` Max speed, `0x24`
-Jumpoff speed, `0x25` Max acceleration) no se tocan, que son los que gobiernan el
-movimiento durante el grabado.
-
-El archivo de fábrica **no describe la máquina**: dice 15 mm/s donde se midieron
-92 mm/s. Sirve como referencia, no como estado real.
-
-**Los parámetros por cable no cambian nada.** `Ruida.set_param()` (paquete `e7`, el
-mismo que abre un `.rd`) lo confirma la controladora con un `c6` y no cambia nada:
-medido a 0.225 mm por pulso de 1 ms con el parámetro a 15, a 5 y a 2. Es el mismo muro
-que el movimiento: el 50200 acusa recibo y no ejecuta nada fuera de un trabajo en
-curso. Para el teclado, la única palanca es el perfil de LightBurn. Para el **viaje
-nativo** no hace falta: lo que lo aceleraba era el preámbulo (`Ruida.PREGO`), que sí
-se manda por el mismo 50200.
-
-`Panel.release()` suelta las cuatro teclas al abrir sesión: un proceso muerto a
-mitad de un pulso deja el teclado del panel bloqueado y después ignora las
-pulsaciones nuevas.
-
-### Topes de seguridad
-
-`Panel.SAFE` conserva la caja medida (0..500 × 0..400 mm). Los destinos nativos
-se validan en esa caja antes de enviar `D9 10`; el informe 50207 confirma la
-llegada. `Panel.move_to` sigue rechazando destinos por jog temporalizado.
-
-## Coexistencia con LightBurn / RDWorks
-
-El 50200 usa el puerto origen 40200, que es el mismo que ocupa RDWorks; el 50207 usa
-el 40207. Si tienes las dos cosas abiertas:
-
-```bash
-python ruida.py ping --src 40200
-```
-
-Si el bind falla, hay conflicto de puertos. Además, **no muevas el cabezal a mano
-desde LightBurn mientras corre `run`**: los dos escriben en el mismo canal y las
-coordenadas se mezclan. Cierra el trabajo en LightBurn, ejecuta `run` con las
-cameras ya fijas, y vuelve a abrir LightBurn con las coordenadas.
-
-## Seguridad
-
-- Este código **nunca manda órdenes de corte ni de movimiento del cabezal Z**
-  (no toca `0xA8`/`0xA9` ni el bobinado). Mueve la cabeza, no el láser.
-- Ajustes de potencia, aire, o corte se hacen en LightBurn, no aquí.
-- Prueba siempre con el láser **deshabilitado** y la propia pieza ya en la cámara.
-- `run --no-move` detecta y calcula coordenadas sin mover nada: úsalo para validar
-  la homografía antes de la primera pasada con la máquina en marcha.
-
-## Supuestos y límites conocidos
-
-- **La 7132G no está en la lista de magics documentada.** Por eso el paso 0. El valor
-  por defecto (0x88) es el de la 644XG/654XG y es una apuesta, no un dato.
-- El checksum va como jnweiger (`sum` de los bytes ya swizzleados); el wiki dice
-  "pre-swizzle". Si los movimientos fallan pero el ACK llega raro, es esto.
-- Los ACK/RSP varían por firmware: se aceptan `0xC6` y `0xCC` como ACK, `0x46` y
-  `0xCF` como error.
-- ~~El informe `A5 68` se asume que es la posición del cabezal.~~ **Verificado en esta
-  máquina**: el 50207 reporta `(18.576, 0.0)` en reposo y LightBurn muestra exactamente
-  lo mismo. Es la única lectura de posición que existe y ya se puede usar para
-  confirmar movimientos.
-- `find_marks` es "componentes oscuros de área plausible". Detecta puntos y cruces
-  pero **no distingue un punto de una letra o de un trozo de borde oscuro**. Si ves
-  detecciones falsas, ajusta `--thr`/`min_area` en `calib.json` o añade un filtro de
-  redondez: `cv2.HoughCircles` o la relación de aspecto de la componente.
-- La escala de la cámara del cabezal (`head_fov_mm`) es una constante, no una
-  calibración. Es la fuente de error nº 2 después de la homografía: mídela con
-  `--manual` contra una rejilla conocida.
-- **El driver puede no darte la resolución que pides.** La cenital ha dado
-  1920x1080 pero la del cabezal 1280x720 con el mismo `--width/--height`. El
-  código usa siempre la resolución real del frame (la imprime al abrir y avisa si
-  no coincide), así que los mm por píxel del ajuste fino son correctos. Pero
-  `head_fov_mm` se mide sobre la resolución que entrega de verdad: a 1280 de
-  ancho son 0.023 mm/píxel con un FOV de 30 mm, y por debajo de ~0.02 mm/píxel
-  el centrado no mejora de tolerancia.
-- Sin `find_marks` por plantilla: si las marcas son "círculos o cruces" muy concretos,
-  la detección por momentos puede fallar, y la forma de la componente es el sitio
-  donde añadir la comprobación.
-- No hay reading de homografía por `DA 00 XX XX`; implementado solo el canal 50207.
-- Multiusuario: `run` asume que nadie más toca la máquina.
+Las notas de cada versión están en
+[GitHub Releases](https://github.com/JesPezz/ruida-vision/releases). El diario de
+pruebas con la máquina está en `coplitovs-notas.md`.
