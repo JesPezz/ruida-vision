@@ -17,6 +17,9 @@ le tocaba, el siguiente a la v1.9, es **2.0**. La release `v1.10` queda como est
 comparador del actualizador usa tuplas de enteros, así que quien tenga la 1.10 verá
 la 2.0 como nueva (`actualizar.py test` lo comprueba).
 
+La **2.1** es lo de los dos puntos de abajo (1.bis, el preámbulo): el viaje nativo
+ya no va a 10 mm/s y `Mover 1/2` centra de verdad.
+
 0. **El panel ya no se pisa a sí mismo (carrera en el socket de posición).** El
    `Panel` es uno solo y su socket lo tocan a la vez el poll de posición a 3 Hz de la
    app (`app.py:_cada_paso`) y el hilo del viaje nativo, el jog y el `Parar`. Todo
