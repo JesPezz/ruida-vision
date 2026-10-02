@@ -687,6 +687,11 @@ def main():
         return future
 
     app._tarea = tarea_inline
+    # La vision fina se prueba en hybrid_vision.py test; aqui lo que importa es
+    # que Mover mande el destino nativo y avance. Sin camara, _marca_a devuelve
+    # un problema, que es justo lo que se comprueba unas lineas mas abajo.
+    fine_real = A.hv.fine
+    A.hv.fine = lambda pan, foto, cfg, ns: (pan.pos(), None)
     origenes = []
     goto_nativo_anterior = maquina_falsa.goto_native
     maquina_falsa.goto_native = lambda x, y: (
@@ -715,6 +720,20 @@ def main():
     chk("Mover 2 envia el segundo destino nativo",
         movimientos == [tuple(marcas[0]), tuple(marcas[1])]
         and app.i_marca == 2)
+
+    # Sin camara, el centrado no se puede hacer. No es un fallo de motor: el
+    # punto NO avanza, se avisa y Mover sigue disponible para reintentar.
+    A.hv.fine = fine_real
+    app.i_marca = 0
+    app._native_move_fault = False
+    movimientos.clear()
+    app.mover_marca()
+    chk("sin camara el punto no avanza y no es fallo de motor",
+        app.i_marca == 0 and not app._native_move_fault
+        and "SIN CENTRAR" in app.lbl_punto.cget("text")
+        and "disabled" not in str(app.btn_mover.state()))
+    A.hv.fine = lambda pan, foto, cfg, ns: (pan.pos(), None)
+
     app.cfg["cam_offset_mm"] = [-49.132, 1.438]
     app._fin_punto(0, (390.638, 312.232))
     chk("el punto 1 mantiene la conversion de offset previa",

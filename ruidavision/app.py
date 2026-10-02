@@ -1768,7 +1768,16 @@ class App(tk.Tk):
                 "%.3f, %.3f (error %.3f mm)"
                 % (mm[0], mm[1], pos[0], pos[1], error))
         self.log("punto alcanzado: %.3f, %.3f mm; centrando" % (pos[0], pos[1]))
-        return hv.fine(pan, self._foto_cabeza, self.cfg, ns)
+        # Sin camara o sin fotogramas nuevos es un fallo de preparacion, no del
+        # motor: se devuelve como problema para que la GUI lo diga y deje
+        # reintentar, sin marcar _native_move_fault ni dar por buena una
+        # posicion sin centrar. Los viajes de dentro de fine() son correcciones
+        # entre posiciones ya confirmadas, asi que tambien son reintentables.
+        try:
+            return hv.fine(pan, self._foto_cabeza, self.cfg, ns)
+        except RuntimeError as e:
+            self.log(str(e))
+            return None, str(e)
 
     def _ir_origen_nativo(self):
         maquina = self.maq.get()
