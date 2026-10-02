@@ -194,18 +194,34 @@ class Panel:
         self._beat = 0.0
         self._pending = None
         self._stop_event = threading.Event()
+        # Un solo socket para preguntas y para el movimiento, y lo usan varios
+        # hilos a la vez: el poll de posicion de la app va a 3 Hz y el viaje
+        # nativo, el jog y el Parar van por su propio hilo. Sin este cerrojo,
+        # el _drain() de uno borra el informe a medio montar del otro y
+        # position() devuelve None en mitad de un movimiento: es lo que pasaba
+        # con "se perdio la lectura de posicion durante el movimiento".
+        # RLock porque position() llama a _drain() y _frame(), que ya estan
+        # dentro del mismo cerrojo.
+        self._lock = threading.RLock()
         self.s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.s.bind(("0.0.0.0", src))
         self.s.connect((ip, PORT_PANEL))
         self.s.settimeout(0.2)
         self.release()
 
+    def _send(self, data):
+        """Envia con el cerrojo puesto. Se suelta en cuanto sale el paquete, no
+        se mantiene durante el pulso, para que el poll de posicion no espere a
+        que acabe un jog entero."""
+        with self._lock:
+            self.s.sendall(data)
+
     def release(self):
         # Suelta las cuatro teclas de jog. Si un proceso muere a
         # mitad de un pulso, el panel se queda con esa tecla pulsada y
         # despues ignora las nuevas hasta que llegue su keyup.
         for k in self.JOG.values():
-            self.s.sendall(bytes([0xA5, 0x51, k]))
+            self._send(bytes([0xA5, 0x51, k]))
 
     def stop(self):
         """Cancela el movimiento activo y suelta las teclas sin esperar al pool."""
@@ -261,11 +277,12 @@ class Panel:
 
     def handshake(self, timeout=1.0):
         """Envia 0xCC. True si la controladora contesta."""
-        self._drain()
-        self.s.send(b"\xcc")
-        self._beat = time.time()
-        self._pending = _xy(self._frame(timeout))
-        return self._pending is not None
+        with self._lock:
+            self._drain()
+            self.s.send(b"\xcc")
+            self._beat = time.time()
+            self._pending = _xy(self._frame(timeout))
+            return self._pending is not None
 
     def position(self, timeout=3.0):
         """(x, y) en mm del informe que contesta a este 0xCC.
@@ -273,13 +290,14 @@ class Panel:
         La controladora solo manda a5 68 como respuesta a un 0xCC, nunca por
         su cuenta, asi que se vacia el socket, se pregunta y se lee solo lo
         que venga de verdad."""
-        if self._pending:
-            p, self._pending = self._pending, None
-            return p
-        self._drain()
-        self.s.send(b"\xcc")
-        self._beat = time.time()
-        return _xy(self._frame(timeout))
+        with self._lock:
+            if self._pending:
+                p, self._pending = self._pending, None
+                return p
+            self._drain()
+            self.s.send(b"\xcc")
+            self._beat = time.time()
+            return _xy(self._frame(timeout))
 
     # ------------------------------------------------------------------- jog
     # El 50200 (subida de trabajos) confirma el paquete pero no mueve: el
@@ -326,9 +344,9 @@ class Panel:
 
     def hold(self, key, ms):
         """Mantiene una tecla de jog `ms` milisegundos y la suelta."""
-        self.s.sendall(bytes([0xA5, 0x50, self.JOG[key]]))
+        self._send(bytes([0xA5, 0x50, self.JOG[key]]))
         time.sleep(ms / 1000.0)
-        self.s.sendall(bytes([0xA5, 0x51, self.JOG[key]]))
+        self._send(bytes([0xA5, 0x51, self.JOG[key]]))
 
     def jog_hold(self, key, parar, margen=10.0, poll=0.08, max_ms=120000.0,
                  verbose=True, corte=None):
@@ -354,7 +372,7 @@ class Panel:
         tope = (self.SAFE[1] if sube else self.SAFE[0]) if eje == "X" \
             else (self.SAFE[3] if sube else self.SAFE[2])
         t0, malas, p = time.time(), 0, None
-        self.s.sendall(bytes([0xA5, 0x50, k]))
+        self._send(bytes([0xA5, 0x50, k]))
         try:
             while not parar.is_set() and not self._stop_event.is_set():
                 if (time.time() - t0) * 1000.0 >= max_ms:
@@ -379,7 +397,7 @@ class Panel:
                 if corte is not None and corte(p):
                     break                 # destino alcanzado: no hace falta parar
         finally:
-            self.s.sendall(bytes([0xA5, 0x51, k]))
+            self._send(bytes([0xA5, 0x51, k]))
         return p
 
     def settled(self, tries=3, tol=0.005, pause=0.08):
@@ -639,6 +657,7 @@ def selftest():
     pn = Panel.__new__(Panel)
     pn.verbose, pn._buf, pn._beat, pn._pending = False, b"", 0.0, None
     pn._stop_event = threading.Event()
+    pn._lock = threading.RLock()
     pn.s = FakeSock()
     want = (1000.045, 600.047)
     assert pn.handshake(timeout=0.1) is True
@@ -646,6 +665,64 @@ def selftest():
     pn._pending = None
     assert pn.position(timeout=0.1) == want, "position() no pregunta con 0xCC"
     assert b"\xcc" in pn.s.sent, "no se pregunto al menos una vez"
+    # Dos hilos leyendo a la vez. El informe entra partido en dos trozos, que es
+    # justo la ventana donde el _drain() de uno se come el buffer del otro: sin
+    # el cerrojo, position() devuelve None y el viaje nativo revienta con "se
+    # perdio la lectura de posicion durante el movimiento".
+    class SockPartido:
+        def __init__(self):
+            self.sent, self._pend = [], b""
+
+        def bind(self, a):
+            pass
+
+        def connect(self, a):
+            pass
+
+        def settimeout(self, t):
+            pass
+
+        def send(self, d):
+            self.sent.append(d)
+            if d == b"\xcc":
+                self._pend = REPORT
+
+        sendall = send
+
+        def recv(self, n):
+            if self._pend:
+                trozo, self._pend = self._pend[:6], self._pend[6:]
+                if not self._pend:
+                    time.sleep(0.002)     # la segunda mitad tarda, como en la maquina
+                return trozo
+            raise socket.timeout()
+
+        def getsockname(self):
+            return ("0.0.0.0", 0)
+
+        def close(self):
+            pass
+    pp = Panel.__new__(Panel)
+    pp.verbose, pp._buf, pp._beat, pp._pending = False, b"", 0.0, None
+    pp._stop_event = threading.Event()
+    pp._lock = threading.RLock()
+    pp.s = SockPartido()
+    leidos, Lost = [], []
+
+    def lee():
+        for _ in range(40):
+            q = pp.position(timeout=1.0)
+            (leidos if q is not None else Lost).append(q)
+
+    hilos = [threading.Thread(target=lee) for _ in range(4)]
+    for h in hilos:
+        h.start()
+    for h in hilos:
+        h.join()
+    assert not Lost, ("dos lecturas se pisaron: %d de 160 volvieron None"
+                      % len(Lost))
+    assert len(leidos) == 160, len(leidos)
+    assert all(q == want for q in leidos), "posicion leida distinta de la real"
     # jog continuo: una sola pulsacion de tecla, se suelta SIEMPRE, y corta
     # antes de llegar al tope de viaje. Sin esto, un evento que no llega deja
     # la tecla pegada y el cabezal contra el tope.
