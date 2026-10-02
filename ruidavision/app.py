@@ -102,6 +102,7 @@ if CONGELADO:
     _datos()
 hv.CFG = os.path.join(DATOS, "calib.json")
 hv.BED_PNG = os.path.join(DATOS, "bed.png")
+hv.HEAD_PNG = os.path.join(DATOS, "cabeza.png")
 LOGF = os.path.join(DATOS, "app.log")
 COORDS = os.path.join(DATOS, "coords.txt")
 
@@ -2031,6 +2032,10 @@ class App(tk.Tk):
             try:
                 if clave in ("park", "cam_offset_mm"):
                     v = [float(x) for x in t.replace(";", ",").split(",") if x]
+                    if len(v) != 2:
+                        # vacio o uno solo: se queda lo que habia. Guardar una
+                        # lista vacia aqui revienta la deteccion de marcas.
+                        raise ValueError("hacen falta dos numeros")
                 elif clave in ("top_cam", "head_cam", "marks", "thr", "min_area"):
                     v = int(float(t))
                 elif clave == "head_fov_mm":

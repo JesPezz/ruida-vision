@@ -12,6 +12,7 @@ dist/
 # Datos que escribe la app en su carpeta
 app.log
 build.log
+cabeza.png
 # El ejecutable que arma PyInstaller sale en dist/RuidaVision/, ya cubierto por
 # dist/. No hace falta una linea aqui: en Windows core.ignorecase hace que
 # "RuidaVision/" se lleve por delante el paquete ruidavision/.

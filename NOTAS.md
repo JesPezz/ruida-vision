@@ -18,7 +18,8 @@ comparador del actualizador usa tuplas de enteros, así que quien tenga la 1.10 
 la 2.0 como nueva (`actualizar.py test` lo comprueba).
 
 La **2.1** es lo de los dos puntos de abajo (1.bis, el preámbulo): el viaje nativo
-ya no va a 10 mm/s y `Mover 1/2` centra de verdad.
+ya no va a 10 mm/s y `Mover 1/2` centra de verdad. La **2.2** es el punto **1.ter**:
+lo que la 2.1 no tenía, encontrado usándola con la máquina delante.
 
 0. **El panel ya no se pisa a sí mismo (carrera en el socket de posición).** El
    `Panel` es uno solo y su socket lo tocan a la vez el poll de posición a 3 Hz de la
@@ -79,6 +80,37 @@ ya no va a 10 mm/s y `Mover 1/2` centra de verdad.
    sintética de 720×1280 con el tag de radio 117, offset inicial de 2.24 mm en
    diagonal → 2 viajes por el `max_step` de 2 mm, error final < 0.03 mm; y con la
    marca fuera de plano, `viajes == 0`).
+
+1.ter. **Lo que la 2.1 no tenía, encontrado usando la 2.1 con la máquina delante.**
+   Tres fallos, los tres en el mismo camino (detectar → mover → centrar):
+   - **`cam_offset_mm` vacío reventaba la detección.** La hoja *Ajustes* guardaba
+     `"cam_offset_mm": []` si el campo "Desplazamiento X,Y mm" estaba vacío al
+     guardar, y `ox, oy = cfg["cam_offset_mm"]` (en `cmd_run`, en `detectar` y en la
+     GUI) tiraba `ValueError: not enough values to unpack (expected 2, got 0)`:
+     12 veces en el log, siempre después de "marca 1 / marca 2" y sin llegar a
+     escribir `coords.txt`. Ahora `guardar_cfg` rechaza el campo con dos números que
+     no sean y deja `calib.json` como estaba, y `load_cfg` repara solo los ficheros
+     que ya estaban rotos (o que se editaron a mano) avisando por pantalla.
+   - **La caja de búsqueda era demasiado pequeña para el tag.** `fine` miraba el 35 %
+     central del frame del cabezal, y con `max_area = 0.25 * area de esa caja` el tag
+     de verdad (186.692 px) quedaba descartado por la puerta de atrás: el mensaje era
+     "no veo la marca: revisa iluminacion", que es justo lo que hace pensar en la luz
+     cuando lo que falla es el límite. Ahora mira **el frame entero** y reintenta sin
+     tope de área; si aun así no hay nada, el log dice cuántas manchas hay, de qué
+     áreas y deja el frame en `cabeza.png` (en la carpeta de datos de la app). Con el
+     tag más centrado de lo que se esperaba, el riesgo depillar dos manchas lo lleva
+     el "quedarse con la más centrada".
+   - **El signo de Y estaba invertido en esta máquina.** `head_flip_y` es config a
+     propósito (README §"si la marca se aleja"), y aquí valía -1. Se ve en el log sin
+     más que la serie de offsets: `dy` crecía en el mismo sentido y sin parar
+     (-0.753, -1.577, -3.156, -4.755) y la posición de la cabeza encadenando los
+     pasos (116.318 → 117.071 → 118.648 → 120.648 → **122.648**; lo medido a mano,
+     122.647). X sí convergía, luego el error no era del FOV sino del signo de un eje.
+     **Lo que hay que tocar es `calib.json`, nunca el `p - dy` de `fine`.**
+   - Con el signo bien, medido en la máquina: offset inicial 1.171/0.616 mm, un solo
+     viaje y **error final 0.047 mm**, a 257.435/115.512 — que es el centro del
+     círculo que el usuario tenía medido a mano.
+
 2. **Print and Cut sin sobrepaso en diagonal** (`c81dd8b`): los trayectos largos se
    parten en segmentos XY con temporizador, leyendo posición entre tramos y rematando
    con pulsos cortos; el tiempo por tramo se deriva de la distancia.

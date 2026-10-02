@@ -422,8 +422,11 @@ homografía solo es fiable dentro de la región donde se midió.
 
 El bucle de ajuste fino mide el desplazamiento marca↔centro de imagen en la cámara
 del cabezal, lo convierte a mm con `head_fov_mm` y mueve el cabezal en sentido
-contrario hasta el punto absoluto calculado, con `move_to` (lazo cerrado, medido en
-cada paso). Repite hasta estar a `--tol` o `--iters` iteraciones.
+contrario hasta el punto absoluto calculado, con `goto_native` (viaje nativo
+completo; el `move_to` de pulsos de teclado iba a 10 mm/s y el lazo no llegaba).
+Repite hasta estar a `--tol` o `--iters` iteraciones. Busca en el frame entero, no
+en el centro: si el tag no cae en la caja central no hay corrección posible, y un
+tag grande se salía del tope de área con el mensaje engañoso de "no veo la marca".
 
 Ojo al `--tol`: el paso mínimo del teclado de jog es ~0.2 mm, así que **0.1 mm es
 la tolerancia que converge de forma fiable** (medido: los 4 objetivos de prueba

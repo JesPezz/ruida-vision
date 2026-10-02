@@ -28,6 +28,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CFG = os.path.join(HERE, "calib.json")
 BED_PNG = os.path.join(HERE, "bed.png")
 MARKS_PNG = os.path.join(HERE, "marks.png")
+HEAD_PNG = os.path.join(HERE, "cabeza.png")
 # el orden importa: DSHOW es el que funciona con camaras USB en Windows
 BACKENDS = [getattr(cv2, "CAP_DSHOW", -1), cv2.CAP_ANY]
 DEFAULTS = {
@@ -58,6 +59,14 @@ def load_cfg():
     cfg = dict(DEFAULTS)
     if os.path.exists(CFG):
         cfg.update(json.load(open(CFG)))
+    # La hoja de Ajustes puede dejar un campo de dos numeros vacio, y entonces
+    # queda una lista vacia en el JSON que revienta donde se desempaca. Mejor el
+    # valor por defecto que un crash en mitad de la deteccion.
+    for k in ("park", "cam_offset_mm"):
+        if len(cfg.get(k) or []) != 2:
+            print("AVISO: %s en calib.json no son dos numeros (%r); se usa %s"
+                  % (k, cfg.get(k), DEFAULTS[k]))
+            cfg[k] = list(DEFAULTS[k])
     return cfg
 
 
@@ -967,29 +976,51 @@ def fine(m, foto, cfg, a):
         g = foto()
         # medida sobre el frame real, no sobre la res que pedimos
         h, w = g.shape
-        # La caja de 35% no puede partir el aro: el viaje previo deja el cabezal
-        # a <=0.5 mm del punto (20 px) y cada correccion esta recortada a
-        # max_step (2 mm = 78 px), asi que el tag de 117 px de radio esta siempre
-        # entero. ponytail: si alguna vez se llama con un max_step grande, el aro
-        # se sale de la caja y el ajuste de circulo se va al centro del arco; el
-        # sintoma es que nunca converge y lo dice el registro iter a iter.
-        roi = center_roi(w, h)
-        # Con el cabezal encima de la marca la mancha es enorme en pixeles
-        # (32.6 mm de FOV sobre 1280 px: un tag de 6 mm son 235 px), asi que el
-        # max_area de la calibracion, pensado para la vista de la hoja entera,
-        # se queda corto. Aqui el criterio es el de la caja de busqueda: algo
-        # que la llena en un cuarto no es una marca. El min_area se sube a la
-        # mitad de lo que medico la primera vez: con el cabezal encima solo hay
-        # una mancha de ese tamano, y asi una mota de polvo no se cuela en las
-        # rondas siguientes. La primera la protege el <=0.5 mm de goto_native.
-        found = find_marks(g, roi=roi,
-                           min_area=max(cfg["min_area"], 0.5 * ref),
-                           max_area=int(0.25 * (roi[2] - roi[0]) * (roi[3] - roi[1])),
-                           thr=cfg["thr"], forma="circulo")
+        # Caja de busqueda: la imagen entera. La de 35% centrada era una
+        # apuesta a que el viaje previo deja el tag pegado al centro, y cuando
+        # se falla no falla suave: no ve la marca y no corrige NADA. Con el frame
+        # entero el aro esta siempre entero, que es lo que necesita el ajuste de
+        # circulo, y el unico riesgo real (que haya dos manchas a la vez) ya lo
+        # resuelve quedarse con la mas centrada.
+        # Con el cabezal encima la mancha es enorme en pixeles: en la maquina
+        # real son 186.692 px, un disco de 488 px de diametro, o sea 12.6 mm con
+        # 33 mm de FOV. El max_area de la calibracion, pensado para la vista de
+        # la hoja entera, se queda muy corto. Aqui el criterio es el del frame:
+        # algo que lo llena en un cuarto no es una marca. El min_area se sube a
+        # la mitad de lo que medico la primera vez, para que una mota de polvo
+        # no se cuele en las rondas siguientes. La primera la protege el <=0.5 mm
+        # de goto_native.
+        min_area = max(cfg["min_area"], 0.5 * ref)
+        max_area = int(0.25 * w * h)
+        # El tope de area es una apuesta al FOV configurado, y si el FOV no es
+        # ese la apuesta se pierde: el tag se sale del limite y el sintoma es
+        # el mismo "no veo la marca" que si no hubiera luz. Por eso, si con el
+        # limite no hay nada, se reintenta sin tope en vez de rendirse. El riesgo
+        # es que una sombra gigante de la capsula entre: se queda con la mas
+        # centrada y, aun asi, cada paso esta recortado a max_step.
+        for hi in (max_area, g.size):
+            found = find_marks(g, min_area=min_area, max_area=hi,
+                               thr=cfg["thr"], forma="circulo")
+            if found:
+                if hi != max_area:
+                    print("  iter %d: sin nada por debajo de %d px de area; se "
+                          "acepta hasta %d" % (i + 1, max_area, hi))
+                break
+        # El frame se guarda siempre, no solo cuando no hay marca: si el lazo no
+        # converge por culpa del offset, un log de cuatro lineas no dice si la
+        # mancha es un aro, una sombra o media marca cortada.
+        cv2.imwrite(HEAD_PNG, g)
         if not found:
+            # "no veo la marca" a secas no dice nada: un frame en negro, un tag
+            # mas grande de lo que se admite y una mota de polvo dan el mismo
+            # mensaje. Lo que hay en la imagen y el frame mismo se quedan a mano.
+            areas = [a for _, _, a in find_marks(g, min_area=0, max_area=g.size)]
             problema = ("no veo la marca: revisa iluminacion, que el cabezal no "
                         "tenga la capsula encima y que el tag este entero en el FOV")
             print("  iter %d: %s" % (i + 1, problema))
+            print("  %dx%d px, %d manchas en la imagen (areas %s), se admiten "
+                  "de %d a %d. Frame: %s"
+                  % (w, h, len(areas), areas[:6], min_area, max_area, HEAD_PNG))
             break
         # La que se busca es la mas CENTRADA, no la mas grande: con el cabezal
         # en un punto podem verse a la vez el tag de al lado, la sombra de la
