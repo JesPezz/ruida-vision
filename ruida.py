@@ -141,6 +141,15 @@ class Ruida:
         """Viaje con láser apagado a (x, y) mm absolutos."""
         self._tx(b"\x88" + enc(x, 5) + enc(y, 5))
 
+    # Los tres paquetes que LightBurn mete delante de CADA Go, medidos con
+    # tshark en el 50200 (des-swizzeando y quitando los 2 bytes de checksum).
+    # El D9 en si es byte a byte el nuestro, luego la diferencia de velocidad
+    # solo puede estar aqui. El c9 lleva un valor que LightBurn varia (0 o
+    # 2500 um); se manda el de cero, que aparece en sus Go rapidos.
+    PREGO = (b"\xc9\x02\x00\x00\x00\x00\x00",
+             b"\xc6\x01\x00\x00",
+             b"\xc6\x21\x00\x00")
+
     def move_to_position(self, x, y):
         """Envía el movimiento a coordenadas usado por LightBurn Move > Go.
 
@@ -151,8 +160,9 @@ class Ruida:
         if not (math.isfinite(x) and math.isfinite(y)
                 and x0 <= x <= x1 and y0 <= y <= y1):
             raise ValueError("destino fuera del area segura: %.3f, %.3f" % (x, y))
-        payload = b"\xd9\x10\x00" + enc(x, 5) + enc(y, 5)
-        self._tx(payload, retries=0)
+        for previo in self.PREGO:
+            self._tx(previo)
+        self._tx(b"\xd9\x10\x00" + enc(x, 5) + enc(y, 5), retries=0)
 
     def set_param(self, param, value):
         """Escribe un parametro de la controladora (paquete `e7`).
@@ -490,20 +500,41 @@ def move_and_wait(pan, link, x, y, tol=0.5, timeout=120.0):
     if pan.verbose:
         print("[move] Go nativo Ruida: %.3f, %.3f -> %.3f, %.3f"
               % (start[0], start[1], x, y))
+    # El panel guarda el informe a5 68 mientras ejecuta el viaje y no suelta ni
+    # uno hasta que acaba: da igual cada cuanto se pregunte, la primera
+    # respuesta llega con el viaje ya hecho. Antes ademas se caia la lectura y
+    # tumbaba el viaje entero; ahora While aguanta.
+    # ponytail: el margen de 3 mm/s es el peor caso medido (JOG_RATE 0.031), muy
+    # por debajo de los >300 mm/s que da el Go con preambulo. Se queda como
+    # red de seguridad: si un dia un viaje sale lento, acaba en timeout, nunca
+    # en "confirmado". Confirmar exige dos lecturas estables, no una suposicion.
+    dist0 = math.dist(start, (x, y))
     link.move_to_position(x, y)
-
-    deadline = time.monotonic() + timeout
+    t0 = time.monotonic()
+    deadline = t0 + max(timeout, dist0 / 3.0 + 30.0)
     stable = 0
+    malas = 0
     last = start
     while time.monotonic() < deadline:
         time.sleep(0.2)
         pos = pan.position(min(3.0, max(0.1, deadline - time.monotonic())))
         if not pan._ok(pos):
-            raise RuntimeError(
-                "se perdio la lectura de posicion durante el movimiento; "
-                "el comando nativo no se puede cancelar")
+            # No se aborta. El comando nativo no se puede cancelar, asi que
+            # rendirse aqui solo deja el cabezal moviendose y sin confirmar.
+            malas += 1
+            if pan.verbose:
+                print("[move] sin lectura (%d, %.1f s)"
+                      % (malas, time.monotonic() - t0))
+            continue
+        malas = 0
         last = pos
-        if math.dist(pos, (x, y)) <= tol:
+        falta = math.dist(pos, (x, y))
+        if pan.verbose:
+            dt = time.monotonic() - t0
+            print("[move] %.1f s, pos %.3f, %.3f, faltan %.1f mm%s"
+                  % (dt, pos[0], pos[1], falta,
+                     ", %.0f mm/s" % ((dist0 - falta) / dt) if dt > 0.5 else ""))
+        if falta <= tol:
             stable += 1
             if stable >= 2:
                 if pan.verbose:
@@ -513,10 +544,12 @@ def move_and_wait(pan, link, x, y, tol=0.5, timeout=120.0):
             stable = 0
 
     raise TimeoutError(
-        "el movimiento nativo sigue sin confirmarse tras %.1f s; ultima "
-        "posicion %.3f, %.3f, destino %.3f, %.3f. No envia otro comando: "
-        "este viaje no admite cancelacion desde la app."
-        % (timeout, last[0], last[1], x, y))
+        "el movimiento nativo sigue sin confirmarse tras %.1f s (%d lecturas "
+        "perdidas); ultima posicion %.3f, %.3f, destino %.3f, %.3f, %.1f mm "
+        "de %.1f. No envia otro comando: este viaje no admite cancelacion "
+        "desde la app."
+        % (time.monotonic() - t0, malas, last[0], last[1], x, y,
+           dist0 - math.dist(last, (x, y)), dist0))
 
 
 # ------------------------------------------------------------------ autocomprobado
@@ -552,6 +585,13 @@ def selftest():
     native = Ruida.__new__(Ruida)
     native.ip, native.magic, native.retries, native.verbose = (
         "192.168.1.50", MAGIC, 3, False)
+
+    def planos(pkt):
+        """Lo que se manda, sin los 2 bytes de checksum y des-swizzeado."""
+        return [unswz(p[2:]) for p in pkt]
+
+    # El Go es byte a byte el de LightBurn, pero LightBurn manda antes estos
+    # tres. Se comparan los dos lados en claro, que es lo que hay que fijar.
     for x, y, packet in (
             (183.010, 80.000,
              "06 32 52 99 89 89 89 03 1d eb 89 89 8d 79 89"),
@@ -561,7 +601,8 @@ def selftest():
              "07 08 52 99 89 89 89 11 d9 f1 89 89 1d a1 d7")):
         native.s = MoveSock()
         native.move_to_position(x, y)
-        assert native.s.sent == [bytes.fromhex(packet)], (x, y, native.s.sent)
+        assert planos(native.s.sent) == list(Ruida.PREGO) \
+            + [unswz(bytes.fromhex(packet)[2:])], (x, y, planos(native.s.sent))
     native.s.sent[:] = []
     try:
         native.move_to_position(500.001, 200.0)
@@ -572,10 +613,11 @@ def selftest():
     native.s = MoveSock(reply=None)
     try:
         native.move_to_position(419.960, 349.278)
-        raise AssertionError("un viaje sin ACK se dio por confirmado")
+        raise AssertionError("un viaje sin ACK se dio por bueno")
     except IOError as e:
         assert "no confirma" in str(e), str(e)
-    assert len(native.s.sent) == 1, "se reintento un viaje cuyo ACK se perdio"
+    assert len(native.s.sent) == native.retries + 1, \
+        "un paquete sin ACK se reintento de otra manera"
     class PositionPanel:
         verbose = False
 
@@ -593,9 +635,11 @@ def selftest():
     class PositionLink:
         def __init__(self):
             self.targets = []
+            self.envios = []
 
         def move_to_position(self, x, y):
             self.targets.append((x, y))
+            self.envios.append((x, y))
 
     fake_panel, fake_link = PositionPanel(), PositionLink()
     real_sleep = time.sleep
@@ -612,6 +656,48 @@ def selftest():
     except ValueError as e:
         assert "area segura" in str(e), str(e)
     assert fake_link.targets == [(419.960, 349.278)], fake_link.targets
+
+    class LinkRevienta(PositionLink):
+        def move_to_position(self, x, y):
+            self.envios.append((x, y))
+            raise IOError("la controladora no confirma el comando")
+
+    revienta = LinkRevienta()
+    try:
+        move_and_wait(PositionPanel(), revienta, 419.960, 349.278)
+        raise AssertionError("un link que revienta no dio error")
+    except IOError:
+        pass
+
+    # El panel se calla mientras ejecuta el viaje (10 mm/s, ~46 s) y antes se
+    # abortaba en la PRIMERA lectura perdida. Ahora se aguantan varias.
+    # La posicion inicial sigue siendo obligatoria: sin ella no se manda nada.
+    class MudoPanel:
+        verbose = False
+
+        def __init__(self, inicial, mudas):
+            self.positions = iter([inicial] + [None] * mudas
+                                  + [(180.0, 80.0), (419.96, 349.278),
+                                     (419.96, 349.278)])
+
+        position = PositionPanel.position
+        _ok = PositionPanel._ok
+
+    link_mudo = PositionLink()
+    time.sleep = lambda seconds: None
+    try:
+        llegada = move_and_wait(MudoPanel((20.0, 20.0), 5), link_mudo,
+                                419.960, 349.278)
+        assert llegada == (419.96, 349.278), llegada
+        link_ciego = PositionLink()
+        try:
+            move_and_wait(MudoPanel(None, 5), link_ciego, 419.960, 349.278)
+            raise AssertionError("un viaje sin posicion inicial se dio por bueno")
+        except RuntimeError as e:
+            assert "posicion inicial" in str(e), str(e)
+        assert not link_ciego.targets, "se mando el viaje sin posicion inicial"
+    finally:
+        time.sleep = real_sleep
 
     p = bytes.fromhex("a56800003d046d0000244f6f")
     assert (dec(p[2:7]), dec(p[7:12])) == (1000.045, 600.047)

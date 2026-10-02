@@ -38,11 +38,44 @@ la 2.0 como nueva (`actualizar.py test` lo comprueba).
 1. **Viajes nativos (`D9 10`) en `Mover 1/2` y `Origen 0,0`.** `ruida.py` reproduce el
    datagrama capturado de LightBurn, recorta a la mesa (0..500 × 0..400 mm) y confirma
    la llegada por la posición del panel antes de habilitar el siguiente punto
-   (`_marca_a` mide el error y avisa en mm si pasa de 0.5). `ir_a` bloquea si hay un
+   (`_marca_a` mide el error y avisa en mm si pasa de 0.5; el centrado fina es el
+   punto 1.bis). `ir_a` bloquea si hay un
    viaje activo, sin confirmar, o con el jog en mano. Recordatorio de seguridad: el
    viaje **no se cancela** ni desde la app ni con el Stop de LightBurn, y la app avisa
    antes de bloquear el cierre. Lo verificado por captura y confirmación del usuario
    es el destino; el recorrido completo está pendiente de máquina (ver §5).
+
+1.bis. **`Mover 1/2` ahora centra, no solo se acerca.** `hybrid_vision.fine()` existía
+   desde la v1.5 pero **la GUI nunca la llamó**: `_marca_a` hacía `goto_native(mm)` y se
+   quedaba con que el error fuera < 0.5 mm. Tres cosas que había que arreglar antes de
+   conectarla:
+   - `fine` tomaba la `VideoCapture` y usaba `grab()`, pero la cámara del cabezal la
+     tiene abierta el hilo `Video` del preview; no se puede volver a abrir. Ahora
+     `fine(m, foto, cfg, a)` recibe un **callable** que devuelve un frame gris, y la
+     GUI le pasa `_foto_cabeza()`, que espera a que el hilo publique un `n` nuevo.
+     Siguiente paso si molesta el preview (que no usa el Laplacian de `grab`): parar
+     el preview y abrir con `hv.grab`.
+   - El centro salía del **centroide de momentos**, que en un aro de grosor desigual
+     se va hacia el lado grueso: medido, **6.12 px de error** contra **1.07 px**
+     ajustando el círculo (Kasa por mínimos cuadrados, `fit_circulo`). Nuevo
+     `forma="circulo"` en `find_marks`; la calibración sigue con centroide porque es
+     lo que ya está medido.
+   - Corregía con `pan.move_to()`, que son pulsos de 100 ms a 10 mm/s. Ahora corrige
+     con `m.goto_native()`, o sea el mismo viaje nativo de `PREGO`.
+
+   Además elige **la candidata más centrada** (no la de mayor área) y pone suelo de
+   área a la mitad de la referencia, para que el polvo no llame. Si no converge
+   devuelve un motivo y la GUI **no avanza de punto**: deja `PUNTO n: SIN CENTRAR` en
+   rojo con el motivo y el aviso de reintentar, y a diferencia de un fallo de
+   movimiento no marca `_native_move_fault` (es un problema de luz, no de motor).
+   Iteraciones y tolerancia salen de los cuadros de la hoja Marcas y se leen en el
+   hilo de la UI (leer widgets Tk desde el worker no es seguro).
+
+   Cobertura nueva en `hybrid_vision.py test`: *ajuste de aro* (elipse de grosor
+   desigual + cruz, `ef < 2.0 and ef*3 < ec`) y *centrado* (máquina falsa, foto
+   sintética de 720×1280 con el tag de radio 117, offset inicial de 2.24 mm en
+   diagonal → 2 viajes por el `max_step` de 2 mm, error final < 0.03 mm; y con la
+   marca fuera de plano, `viajes == 0`).
 2. **Print and Cut sin sobrepaso en diagonal** (`c81dd8b`): los trayectos largos se
    parten en segmentos XY con temporizador, leyendo posición entre tramos y rematando
    con pulsos cortos; el tiempo por tramo se deriva de la distancia.
@@ -339,8 +372,16 @@ Lo de antes, igual:
 (Inno Setup 6), y `ruidavision/actualizar.py` (OTA contra `releases/latest` de GitHub).
 
 Queda por hacer / comprobar:
-- El techo de **5 mm/s es del perfil de LightBurn** ("Config maquina jog lento"); no se
-  puede cambiar desde aquí porque `set_param` no hace nada (README 319-323).
+- ~~El techo de 5 mm/s es del perfil de LightBurn~~ — **era falso.** El viaje nativo
+  iba a ~10 mm/s porque faltaban los tres paquetes que LightBurn mete delante de cada
+  Go (`c9 02 00 00 00 00 00`, `c6 01 00 00`, `c6 21 00 00`; medidos con `tshark` en el
+  50200, des-swizzeando y sin los 2 bytes de checksum). Con ellos sale a >300 mm/s.
+  El `D9` en sí ya era byte a byte el de LightBurn, por eso no se veía el problema.
+  Ahora son `Ruida.PREGO`. Los 5 mm/s del perfil siguen sin ser un techo real: un
+  pulso de 100 ms mide 3,4 mm, no los 0,68 mm que darían 5 mm/s.
+- El panel se calla mientras ejecuta el viaje, así que `move_and_wait` ya no aborta a
+  la primera lectura perdida (antes tumbaba el viaje entero, que no se puede cancelar).
+  Aguanta varias, exige dos lecturas estables y deja el timeout como red de seguridad.
 
 El **repo es público** a propósito: `actualizar.py` no lleva token (solo biblioteca
 estándar, a propósito), y contra un repo privado la API devuelve 404 aunque exista la

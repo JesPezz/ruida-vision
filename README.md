@@ -36,11 +36,14 @@ la app. `Estacionar` en Calibrar y **Detectar y centrar los 2** siguen
 deshabilitados; el jog manual permanece en 50207. Antes de probar, verifica que
 el láser esté deshabilitado y deja despejada la trayectoria.
 
-El comando `D9 10` no incluye una velocidad: el perfil/estado de la controladora
-determina el ritmo. La app no puede acelerarlo con un parámetro de viaje. Si la
-velocidad parece anormal, comprueba el estado de la máquina con LightBurn antes
-de continuar; un timeout de confirmación no significa que el movimiento se haya
-detenido.
+El comando `D9 10` no incluye una velocidad, pero **su ritmo sí depende de lo que se
+mande antes**: LightBurn precede cada Go con tres paquetes (`c9`, `c6 01`, `c6 21`) y
+con ellos el viaje sale a más de 300 mm/s; sin ellos la controladora lo ejecuta a
+~10 mm/s. Los bytes del `D9` son correctos byte a byte, luego la diferencia está solo
+en el preámbulo. La app los manda (`Ruida.PREGO`); no se acelera con `set_param`,
+que no cambia nada. Si aun así el ritmo parece anormal, comprueba el estado de la
+máquina con LightBurn antes de continuar; un timeout de confirmación no significa
+que el movimiento se haya detenido.
 
 En **Calibrar** hay un pad compacto de jog direccional (toque = paso; mantener =
 continuo), ajuste del paso con rueda en saltos de 0.5 mm, acceso para conectar
@@ -501,6 +504,23 @@ Print and Cut reproduce ese datagrama, recibe el ACK y consulta la posición en
 50207 hasta confirmar llegada. No se han de sustituir esos bytes por `0x88`,
 `0x89` ni por jogs simultáneos.
 
+LightBurn, además, mete **tres paquetes delante de cada Go** — medido con `tshark` en
+el 50200, des-swizzeando y quitando los 2 bytes de checksum — y el `D9` en sí es
+byte a byte el nuestro:
+
+| # | bytes | qué es |
+|---|-------|--------|
+| 1 | `c9 02 00 00 00 00 00` | LightBurn varía aquí el valor (0 o 2500 µm); se manda el de cero, que es el de sus Go rápidos |
+| 2 | `c6 01 00 00` | |
+| 3 | `c6 21 00 00` | |
+
+Esos tres son la diferencia entre **~10 mm/s** (sin ellos) y **>300 mm/s** (con
+ellos), y son `Ruida.PREGO`. El panel además se calla mientras ejecuta el viaje, así
+que `move_and_wait` ya no aborta a la primera lectura perdida: aguanta varias, exige
+**dos** lecturas estables para confirmar y deja el timeout como red de seguridad
+(`max(timeout, distancia/3 + 30)`, con 3 mm/s de margen, muy por debajo de los
+>300 mm/s reales).
+
 El 50207 sí mueve, con teclas de jog. Tabla medida en esta máquina, que es la
 opuesta a la documentación:
 
@@ -526,8 +546,11 @@ máquina corre en su propio hilo, de modo que mantener una tecla **no congela la
 El botón **Parar** suelta las cuatro teclas del panel y detiene el jog manual. No
 interrumpe el viaje nativo a coordenadas; ante una emergencia usa el paro físico.
 
-El techo de velocidad del continuo es el del perfil de LightBurn (5 mm/s), no algo que
-se ajuste desde la app: `set_param` por red no cambia nada (ver la sección de abajo).
+El techo del continuo **no es el perfil de LightBurn**: los 5 mm/s de
+"Config maquina jog lento" tampoco describen esta controladora (ver la tabla de abajo:
+100 ms de pulso dan 3,4 mm, no los 0,68 mm que daría 5 mm/s). Lo que sí se puede
+cambiar desde la app es el **viaje nativo**: sin el preámbulo de LightBurn iba a
+~10 mm/s.
 
 ### Las cámaras: el MJPG hay que pedirlo al abrir
 
@@ -593,11 +616,13 @@ movimiento durante el grabado.
 El archivo de fábrica **no describe la máquina**: dice 15 mm/s donde se midieron
 92 mm/s. Sirve como referencia, no como estado real.
 
-**No se puede cambiar por cable.** `Ruida.set_param()` (paquete `e7`, el mismo que
-abre un `.rd`) lo confirma la controladora con un `c6` y no cambia nada: medido a
-0.225 mm por pulso de 1 ms con el parámetro a 15, a 5 y a 2. Es el mismo muro que el
-movimiento: el 50200 acusa recibo y no ejecuta nada fuera de un trabajo en curso.
-Hay que subir el perfil con LightBurn conectado a la máquina.
+**Los parámetros por cable no cambian nada.** `Ruida.set_param()` (paquete `e7`, el
+mismo que abre un `.rd`) lo confirma la controladora con un `c6` y no cambia nada:
+medido a 0.225 mm por pulso de 1 ms con el parámetro a 15, a 5 y a 2. Es el mismo muro
+que el movimiento: el 50200 acusa recibo y no ejecuta nada fuera de un trabajo en
+curso. Para el teclado, la única palanca es el perfil de LightBurn. Para el **viaje
+nativo** no hace falta: lo que lo aceleraba era el preámbulo (`Ruida.PREGO`), que sí
+se manda por el mismo 50200.
 
 `Panel.release()` suelta las cuatro teclas al abrir sesión: un proceso muerto a
 mitad de un pulso deja el teclado del panel bloqueado y después ignora las

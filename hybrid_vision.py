@@ -141,11 +141,49 @@ def read_gris(cap):
 
 # ---------------------------------------------------------------- deteccion
 
+def fit_circulo(mascara):
+    """Centro del aro por minimos cuadrados algebraicos (Kasa) sobre el contorno
+    exterior: el punto que minimiza la suma de (distancia al radio - r)^2.
+
+    El centroide de momentos pesa toda la mascara, y con el tag de LightBurn
+    (aro + cruz dentro) la cruz desplaza el centro. Cuando ademas el aro esta
+    cortado por el borde de la ROI, que es lo normal con la marca descentrada,
+    el centroide se va al centro del arco mientras que el ajuste devuelve el
+    centro real del aro. Sin la normalizacion de Kasa (dividir por Sxx*Syy-Sxy^2)
+    el sistema es singular para un arco pequeno.
+    """
+    contornos, _ = cv2.findContours(mascara, cv2.RETR_EXTERNAL,
+                                    cv2.CHAIN_APPROX_NONE)
+    if not contornos:
+        return None
+    cont = max(contornos, key=cv2.contourArea).reshape(-1, 2).astype(float)
+    if len(cont) < 8:
+        return None
+    x, y = cont[:, 0], cont[:, 1]
+    mx, my = x.mean(), y.mean()
+    u, v = x - mx, y - my
+    suu = float((u * u).sum())
+    svv = float((v * v).sum())
+    suv = float((u * v).sum())
+    den = suu * svv - suv ** 2
+    if den < 1e-6:
+        return None
+    b = 0.5 * (float((u * (u * u + v * v)).sum()) / suu
+               + float((v * (u * u + v * v)).sum()) / svv)
+    return (mx + (svv * u.sum() - suv * v.sum()) / (2.0 * den),
+            my + (suu * v.sum() - suv * u.sum()) / (2.0 * den))
+
+
 def find_marks(gray, roi=None, min_area=8, max_area=40000, thr=0, merge=1,
-               show=False, min_circularity=0.0, max_aspect_ratio=float("inf")):
+               show=False, min_circularity=0.0, max_aspect_ratio=float("inf"),
+               forma="centroide"):
     """Marcas de registro: componentes oscuros de area plausible, centro
     subpixel por momentos. `min_circularity` permite excluir textura, reflejos
     y bordes cuando la vista solo debe resaltar marcas redondas.
+
+    `forma="circulo"` cambia SOLO como se calcula el centro, por `fit_circulo`.
+    Por defecto sigue el centroide porque la calibracion se hizo con el: el
+    ajuste de aro solo lo usa el centrado, que va a 0.0255 mm/px.
 
     `merge` agrupa en una sola marca las detecciones cuyos centroides caen en el
     mismo pixel. El tag de LightBurn es un aro con la cruz dentro, y sin esto son
@@ -183,11 +221,17 @@ def find_marks(gray, roi=None, min_area=8, max_area=40000, thr=0, merge=1,
             circularity = 4.0 * math.pi * cv2.contourArea(contour) / perimeter ** 2
             if circularity < min_circularity:
                 continue
-        m = cv2.moments(component)
-        if m["m00"] <= 0:
-            continue
-        out.append((x0 + x + m["m10"] / m["m00"],
-                    y0 + y + m["m01"] / m["m00"], int(a)))
+        if forma == "circulo":
+            c = fit_circulo(component)
+            if c is None:
+                continue
+            centro = c
+        else:
+            m = cv2.moments(component)
+            if m["m00"] <= 0:
+                continue
+            centro = (m["m10"] / m["m00"], m["m01"] / m["m00"])
+        out.append((x0 + x + centro[0], y0 + y + centro[1], int(a)))
     out.sort(key=lambda p: p[2], reverse=True)
     if merge:
         # De mayor a menor area: cada deteccion se une a la primera del grupo
@@ -870,7 +914,11 @@ def cmd_run(a):
                 out.append((mx, my))
                 continue
             m.goto(mx, my)
-            pos = fine(m, head, cfg, a)
+            pos, problema = fine(m, lambda: grab(head, a.frames), cfg, a)
+            if problema:
+                # sys.exit y no un return: una posicion sin centrar es peor que
+                # ninguna, y apuntarla en LightBurn dispara donde no toca.
+                sys.exit("marca %d SIN CENTRAR: %s" % (i, problema))
             out.append(pos)
         ox, oy = cfg["cam_offset_mm"]
         print("\ncoordenadas para el modulo Print and Cut de LightBurn:")
@@ -898,39 +946,79 @@ def center_roi(w, h, frac=0.35):
             min(w, w // 2 + pad), min(h, h // 2 + pad))
 
 
-def fine(m, head, cfg, a):
-    """Recentra la marca con la camara del cabezal. Devuelve la posicion real."""
+def fine(m, foto, cfg, a):
+    """Recentra la marca con la camara del cabezal.
+
+    `foto` es un cero-argumentos que devuelve un fotograma EN GRIS, de uno en
+    uno, no una VideoCapture: la camara del cabezal puede estar abierta en el
+    hilo de previsualizacion de la ventana y abrirla otra vez aqui da imagen
+    negra. Ver _foto_cabeza en la app.
+
+    Devuelve (posicion, problema). `problema` es None si quedo centrado, y si no
+    lo esta dice POR QUE en una linea para el rotulo de la ventana: un
+    "no queda centrado" sin motivo no se puede arreglar. La posicion que se
+    devuelve cuando hay problema NO sirve para anotar en LightBurn y por eso el
+    que la pinta decide.
+    """
     fov = cfg["head_fov_mm"]
+    problema = "no se centro en %d iteraciones; mira el registro" % a.iters
+    ref = 0
     for i in range(a.iters):
-        g = grab(head, a.frames)
+        g = foto()
         # medida sobre el frame real, no sobre la res que pedimos
         h, w = g.shape
+        # La caja de 35% no puede partir el aro: el viaje previo deja el cabezal
+        # a <=0.5 mm del punto (20 px) y cada correccion esta recortada a
+        # max_step (2 mm = 78 px), asi que el tag de 117 px de radio esta siempre
+        # entero. ponytail: si alguna vez se llama con un max_step grande, el aro
+        # se sale de la caja y el ajuste de circulo se va al centro del arco; el
+        # sintoma es que nunca converge y lo dice el registro iter a iter.
         roi = center_roi(w, h)
-        found = find_marks(g, roi=roi, min_area=cfg["min_area"],
-                           max_area=cfg["max_area"], thr=cfg["thr"])
+        # Con el cabezal encima de la marca la mancha es enorme en pixeles
+        # (32.6 mm de FOV sobre 1280 px: un tag de 6 mm son 235 px), asi que el
+        # max_area de la calibracion, pensado para la vista de la hoja entera,
+        # se queda corto. Aqui el criterio es el de la caja de busqueda: algo
+        # que la llena en un cuarto no es una marca. El min_area se sube a la
+        # mitad de lo que medico la primera vez: con el cabezal encima solo hay
+        # una mancha de ese tamano, y asi una mota de polvo no se cuela en las
+        # rondas siguientes. La primera la protege el <=0.5 mm de goto_native.
+        found = find_marks(g, roi=roi,
+                           min_area=max(cfg["min_area"], 0.5 * ref),
+                           max_area=int(0.25 * (roi[2] - roi[0]) * (roi[3] - roi[1])),
+                           thr=cfg["thr"], forma="circulo")
         if not found:
-            print("  iter %d: no veo la marca, reviso iluminacion/FOV" % (i + 1))
-            return m.pos() or (0.0, 0.0)
-        u, v, area = found[0]
+            problema = ("no veo la marca: revisa iluminacion, que el cabezal no "
+                        "tenga la capsula encima y que el tag este entero en el FOV")
+            print("  iter %d: %s" % (i + 1, problema))
+            break
+        # La que se busca es la mas CENTRADA, no la mas grande: con el cabezal
+        # en un punto podem verse a la vez el tag de al lado, la sombra de la
+        # capsula y el tag suelto de la cama, y el de mayor area no tiene por
+        # que ser el que hay debajo de la camara.
+        u, v, area = min(found, key=lambda p: math.hypot(p[0] - w / 2.0, p[1] - h / 2.0))
+        ref = ref or area
         # la camara puede estar girada o espejada: por eso los signos son config
         dx = (u - w / 2.0) * fov / w * cfg["head_flip_x"]
         dy = (v - h / 2.0) * fov / w * cfg["head_flip_y"]
-        print("  iter %d: offset %.3f, %.3f mm (px %.1f, %.1f, area %d)"
-              % (i + 1, dx, dy, u, v, area))
+        print("  iter %d: offset %.3f, %.3f mm (px %.1f, %.1f, area %d, "
+              "%d candidatas)"
+              % (i + 1, dx, dy, u, v, area, len(found)))
         if math.hypot(dx, dy) < a.tol:
-            print("  centrado")
-            return m.pos() or (0.0, 0.0)
-        step = math.hypot(dx, dy)
-        if step > a.max_step:
-            dx, dy = dx * a.max_step / step, dy * a.max_step / step
+            print("  centrado (error %.3f mm)" % math.hypot(dx, dy))
+            return m.pos(), None
+        paso = math.hypot(dx, dy)
+        if paso > a.max_step:
+            dx, dy = dx * a.max_step / paso, dy * a.max_step / paso
             print("  paso recortado a %.2f mm" % a.max_step)
-        # destino absoluto + lazo cerrado: la velocidad de jog es una
-        # rampa, no una constante, asi que un salto abierto de "dx mm"
-        # se queda corto. move_to mide, corrige y vuelve a medir.
-        p = m.pos() or (0.0, 0.0)
-        m.pan.move_to(p[0] - dx, p[1] - dy, tol=a.tol)
-    print("AVISO: no se centro en %d iteraciones" % a.iters)
-    return m.pos() or (0.0, 0.0)
+        # Viaje NATIVO al destino absoluto corregido, no el move_to de pulsos de
+        # 100 ms: ese iba a 10 mm/s y el lazo cerrado no llegaba. El signo es el
+        # de menos: si la marca sale a la derecha hay que llevarla a la izquierda.
+        p = m.pos()
+        if p is None:
+            raise RuntimeError("el panel no devolvio posicion: no se puede corregir")
+        m.goto_native(p[0] - dx, p[1] - dy)
+    print("AVISO: %s" % problema)
+    return m.pos(), problema
 
 
 def save_txt(out, cfg, a):
@@ -1318,6 +1406,80 @@ def cmd_test(a):
         cv2.circle(g, (cx, 200), 20, 0, 2, cv2.LINE_AA)
     assert len(find_marks(g, merge=6)) == 2
     print("tag aro+cruz: OK (1 marca a cualquier radio, 2 tags separados = 2)")
+    # El centro del aro sale por ajuste de circulo y no por momentos. Con el aro
+    # de un grosor uneven (luz que no llega igual a los dos lados), el centroide
+    # se va hacia el lado con mas tinta; el ajuste solo mira como se curva el
+    # borde. A 0.0255 mm/px, 6 px de centroide son 0.15 mm: por encima de la
+    # tolerancia de 0.1, que es justo lo que pasaba con el centrado.
+    g = np.full((400, 600), 255, np.uint8)
+    cv2.ellipse(g, (300, 200), (60, 60), 0, 90, 270, 0, 6, cv2.LINE_AA)
+    cv2.circle(g, (300, 200), 60, 0, 3, cv2.LINE_AA)
+    for a in (0, 90):
+        d = int(30 * np.cos(np.radians(a))), int(30 * np.sin(np.radians(a)))
+        cv2.line(g, (300 - d[0], 200 - d[1]), (300 + d[0], 200 + d[1]),
+                 0, 3, cv2.LINE_AA)
+    roi = (150, 50, 450, 350)
+    ec = math.dist(find_marks(g, roi=roi, min_area=40, merge=0)[0][:2], (300, 200))
+    ef = math.dist(find_marks(g, roi=roi, min_area=40, merge=0,
+                              forma="circulo")[0][:2], (300, 200))
+    assert ef < 2.0 and ef * 3 < ec, ("ajuste %.2f px, centroide %.2f px" % (ef, ec))
+    print("ajuste de aro: OK (ajuste %.2f px frente a centroide %.2f px)" % (ef, ec))
+    # El lazo de `fine` entero, con una maquina y una foto de mentira. Lo que se
+    # mira es el SIGNO de la correccion: si se cambia uno de los dos signos (el
+    # del offset o el del destino) el cabezal se va al lado contrario, y eso no
+    # se ve en una captura de pantalla.
+    #
+    # Ojo con la convencion de la foto de aqui: el codigo aplica `p - dx`, y eso
+    # es lo correcto cuando la imagen del cabezal esta ESPEJADA respecto a los
+    # ejes de la maquina (que es como esta montada, medido en la maquina real con
+    # `--iters 1` y el laser apagado: el offset tiene que decrecer). Si cambias
+    # la foto de este test, lee antes el README: el otro caso de montaje necesita
+    # `head_flip_x: -1` en calib.json, no cambiar el signo aqui.
+    cfg = {"head_fov_mm": 32.0, "head_flip_x": 1, "head_flip_y": 1,
+           "min_area": 8, "thr": 0}
+    k = 32.0 / 1280.0                       # mm por px con ese FOV
+    MARCA = (300.0, 200.0)
+
+    class _M:
+        def __init__(self):
+            self.p = (302.0, 199.0)         # 2 mm a la derecha y 1 mm arriba
+            self.viajes = 0
+
+        def pos(self):
+            return self.p
+
+        def goto_native(self, x, y):
+            self.viajes += 1
+            self.p = (x, y)
+
+    m = _M()
+
+    def foto(marca=True):
+        f = np.full((720, 1280), 255, np.uint8)
+        if marca:
+            # imagen espejada: el cabezal 2 mm a la derecha de la marca pone el
+            # tag 2 mm a la DERECHA del centro de la foto
+            u = int(round(640 + (m.p[0] - MARCA[0]) / k))
+            v = int(round(360 + (m.p[1] - MARCA[1]) / k))
+            cv2.circle(f, (u, v), 117, 0, 3, cv2.LINE_AA)
+        return f
+
+    ns = type("NS", (), dict(iters=4, tol=0.1, max_step=2.0, frames=3))()
+    pos, problema = fine(m, lambda: foto(), cfg, ns)
+    assert problema is None, problema
+    # Dos viajes, no uno: el offset inicial son 2.24 mm en diagonal y max_step
+    # recorta a 2.0, asi que la primera correccion se queda corta a proposito.
+    assert m.viajes == 2, ("2 viajes (uno por el recorte de max_step), hubo %d"
+                           % m.viajes)
+    assert math.dist(m.p, MARCA) < 0.03, (m.p, MARCA)
+    assert math.dist(pos, MARCA) < 0.03, (pos, MARCA)
+    # sin marca: lo dice, no mueve y devuelve una posicion que NO vale
+    m2 = _M()
+    m2.p = (300.0, 200.0)
+    pos, problema = fine(m2, lambda: foto(marca=False), cfg, ns)
+    assert problema and "no veo la marca" in problema, problema
+    assert m2.viajes == 0, m2.viajes
+    print("centrado: OK (corrige 2.24 mm en 2 viajes; sin marca lo dice y no mueve)")
     # En la vista de calibracion, los candidatos circulares evitan iluminar
     # bordes y reflejos alargados que el umbral global ve como componentes.
     g = np.full((300, 500), 255, np.uint8)

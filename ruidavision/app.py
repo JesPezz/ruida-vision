@@ -23,6 +23,7 @@ import queue
 import sys
 import tempfile
 import threading
+import time
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
 from tkinter import messagebox, simpledialog, ttk
@@ -1691,14 +1692,18 @@ class App(tk.Tk):
         self.lbl_marcas.configure(text="moviendo al punto %d..." % (i + 1),
                                   style="Chico.TLabel")
         self.log("marcando punto %d: %.3f, %.3f mm" % (i + 1, mm[0], mm[1]))
+        # El leer los campos desde el hilo de trabajo no es seguro en Tk, asi que
+        # se leen aqui (hilo de la interfaz) y se pasan ya convertidos.
+        ns = self._ns(iters=int(self.v_it.get()),
+                      tol=float(self.v_tol.get().replace(",", ".")))
         # _tarea solo pasa el future a al_terminar, asi que el position va dentro
-        self._tarea(self._marca_a, mm, i,
+        self._tarea(self._marca_a, mm, i, ns,
                     al_terminar=lambda fu: self._fin_movimiento(i, fu))
 
     def _fin_movimiento(self, i, fu):
         self._native_move_active = False
         try:
-            pos = fu.result()
+            pos, problema = fu.result()
         except Exception as e:
             self._native_move_fault = True
             detalle = "ERROR al mover al punto %d: %s" % (i + 1, e)
@@ -1714,15 +1719,45 @@ class App(tk.Tk):
                 "Verifica la posicion fisica antes de volver a mover."
                 % detalle, parent=self)
             return
-        self._fin_punto(i, pos)
+        self._fin_punto(i, pos, problema)
 
-    def _marca_a(self, mm, i):
-        """En el hilo de trabajo: el cabezal al punto, y la posicion que de
-        verdad tiene. Es la que se anota a mano en LightBurn."""
+    def _foto_cabeza(self, timeout=5.0):
+        """Un fotograma NUEVO de la camara del cabezal, en gris, ya publicado
+        por el hilo de preview.
+
+        No se abre la camara aqui: la tiene abierta ese hilo y abrirla dos veces
+        el mismo indice da imagen negra o falla. Se espera a que el contador de
+        fotogramas avance para no medir un fotograma de antes del movimiento. Y
+        si el hilo de las camaras ha muerto, el contador se queda quieto y esto
+        avisa en vez de medir negro.
+
+        ponytail: el preview lee UN fotograma por vuelta y sin el Laplacian de
+        `grab`, asi que este frame puede ir desenfocado. Si el centrado no
+        converge por eso, parar el preview y abrir la camara con
+        `hv.grab(cap, n)` como hace cmd_run.
+        """
+        v = self.video
+        if v is None:
+            raise RuntimeError("no hay camaras conectadas: pulsa Conectar camaras")
+        n0 = v.frame()[0]
+        limite = time.time() + timeout
+        while time.time() < limite:
+            n, _, head = v.frame()
+            if n != n0 and head is not None:
+                return head
+            time.sleep(0.02)
+        raise RuntimeError("la camara del cabezal no da fotogramas nuevos: "
+                           "mira si el hilo de las camaras sigue vivo")
+
+    def _marca_a(self, mm, i, ns):
+        """En el hilo de trabajo: el cabezal al punto, el centrado fino con la
+        camara del cabezal, y la posicion que de verdad tiene. Es la que se
+        anota a mano en LightBurn, asi que si no queda centrado no se enseña
+        ninguna: una posicion sin centrar dispara donde no toca."""
         pan = self.maq.get()
         if pan is None or pan.pan is None:
             self.log("sin panel: no se puede mover")
-            return None
+            return None, "sin panel: no se puede mover"
         pos = pan.goto_native(mm[0], mm[1])
         if not _posicion_valida(pos):
             raise RuntimeError("el panel no devolvio una posicion valida al mover")
@@ -1732,8 +1767,8 @@ class App(tk.Tk):
                 "no se alcanzo el punto %.3f, %.3f; el cabezal quedo en "
                 "%.3f, %.3f (error %.3f mm)"
                 % (mm[0], mm[1], pos[0], pos[1], error))
-        self.log("punto alcanzado: %.3f, %.3f mm" % (pos[0], pos[1]))
-        return pos
+        self.log("punto alcanzado: %.3f, %.3f mm; centrando" % (pos[0], pos[1]))
+        return hv.fine(pan, self._foto_cabeza, self.cfg, ns)
 
     def _ir_origen_nativo(self):
         maquina = self.maq.get()
@@ -1787,10 +1822,25 @@ class App(tk.Tk):
         self._boton_origen()
         self._boton_mover()
 
-    def _fin_punto(self, i, pos):
+    def _fin_punto(self, i, pos, problema=None):
         """Ya esta el cabezal en el punto: se enseña la posicion para copiarla
-        a LightBurn con un dedo, no con el portapapeles."""
+        a LightBurn con un dedo, no con el portapapeles. Si el centrado no ha
+        funcionado no se enseña ninguna posicion: el boton se queda en este
+        punto para poder reintentarlo y el motivo va en el rotulo, que es donde
+        se mira cuando algo no cuadra."""
         ox, oy = self.cfg["cam_offset_mm"]
+        if problema:
+            self.lbl_marcas.configure(text="punto %d sin centrar" % (i + 1),
+                                      style="Mal.TLabel")
+            self.lbl_punto.configure(text="PUNTO %d: SIN CENTRAR" % (i + 1),
+                                      foreground="#8b1a1a")
+            self.lbl_aviso_marca.configure(
+                text="%s. El cabezal esta en el punto, pero esa posicion no vale "
+                     "para LightBurn: arregla lo de arriba y pulsa Mover %d otra vez."
+                     % (problema, i + 1))
+            self._boton_mover()
+            self._boton_origen()
+            return
         if not _posicion_valida(pos):
             self.lbl_punto.configure(
                 text="PUNTO %d: movimiento no confirmado; mira el registro"
