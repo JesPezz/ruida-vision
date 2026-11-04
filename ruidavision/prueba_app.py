@@ -911,11 +911,20 @@ def main():
         and bool(app.txt.cget("yscrollcommand"))
         and y_ultima is not None and y_ultima <= app.txt.winfo_height())
 
-    app.salir()
+    # salir() termina con os._exit para que el instalador OTA pueda sustituir
+    # el .exe. En la prueba se falsea para poder seguir comprobando.
+    salidas = []
+    exit_real = os._exit
+    os._exit = salidas.append
+    try:
+        app.salir()
+    finally:
+        os._exit = exit_real
     # El hilo del pool sigue vivo un instante (parkado) despues del shutdown:
     # lo que importa es que el pool quede cerrado y el proceso pueda salir, que
     # es lo que se ve al terminar esta prueba sin que se quede colgada.
     chk("el pool de trabajo queda cerrado", app.pool._shutdown is True)
+    chk("salir fuerza el cierre del proceso", salidas == [0])
 
     # El escalado de Windows: en Linux esto no se ejecuta nunca, asi que se
     # falsea `sys.platform` y `ctypes.windll` para recorrer las cuatro ramas.

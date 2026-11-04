@@ -1159,7 +1159,8 @@ class App(tk.Tk):
 
     def cal_foto(self):
         self.modo = None
-        self.prompt = "Foto congelada. Pon el cabezal ENCIMA de una marca y pulsa 3."
+        self.prompt = ("Foto congelada. Lleva el cabezal ENCIMA de una marca y "
+                       "haz clic en el centro de esa marca en la foto.")
         self._congelar("top")
 
     def _fov_muestra(self):
@@ -1577,8 +1578,9 @@ class App(tk.Tk):
                           "del cabezal, el jog manual y las coordenadas. Clic en "
                           "una coordenada = copiarla.",
                   style="Chico.TLabel", wraplength=980, justify="left").pack(anchor="w")
-        ttk.Label(h, text="El centrado automatico de los dos puntos en una sola tarea "
-                          "sigue deshabilitado; usa Mover 1 y Mover 2 por separado.",
+        ttk.Label(h, text="Detectar y centrar los 2 hace todo seguido: estaciona, "
+                          "detecta y lleva el cabezal a cada marca. Mover 1 / Mover 2 "
+                          "siguen disponibles para ir paso a paso.",
                   style="Chico.TLabel", wraplength=980, justify="left").pack(anchor="w")
         ttk.Label(h, text="Mover usa el viaje nativo de LightBurn a coordenadas; "
                           "no simula teclas. El viaje no se puede cancelar desde la "
@@ -2235,7 +2237,12 @@ class App(tk.Tk):
         except Exception:
             pass
         self.pool.shutdown(wait=False)
-        self.destroy()
+        try:
+            self.destroy()
+        finally:
+            # destroy() cierra la ventana, pero un hilo del pool puede dejar el
+            # proceso vivo y el instalador OTA no puede reemplazar el .exe.
+            os._exit(0)
 
 
 if __name__ == "__main__":
