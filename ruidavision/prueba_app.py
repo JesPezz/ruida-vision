@@ -473,9 +473,9 @@ def main():
     # puede existir en ninguna hoja.
     chk("Estacionar ya no es un boton suelto (Vivo usa Origen 0,0)",
         "Estacionar" not in nombres and "Origen 0,0" in nombres)
-    chk("Origen 0,0 usa el viaje nativo habilitado y Estacionar sigue deshabilitado",
+    chk("Origen 0,0 y Estacionar usan el viaje automatico habilitado",
         "disabled" not in str(app.btn_origen.state())
-        and "disabled" in str(app.btn_cal_park.state()))
+        and "disabled" not in str(app.btn_cal_park.state()))
     chk("Calibrar ofrece jog direccional, reconexion y ajuste de deteccion",
         all(name in nombres for name in ("Conectar cámaras", "+Y", "-X", "+X", "-Y",
                                           "Aplicar en foto")))
@@ -779,8 +779,8 @@ def main():
         and app.lbl_pos.cget("style") == "Ok.TLabel")
     chk("Parar advierte que el viaje nativo no se puede cancelar",
         avisos and "no interrumpe" in avisos[0][1].lower())
-    chk("centrado automatico tambien queda deshabilitado",
-        "disabled" in str(app.btn_run_marcas.state()))
+    chk("centrado automatico esta habilitado",
+        "disabled" not in str(app.btn_run_marcas.state()))
     app.marcas2, app.i_marca = marcas, 0
     errores_ui = []
     showerror_real = A.messagebox.showerror

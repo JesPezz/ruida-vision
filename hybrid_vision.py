@@ -333,9 +333,9 @@ class Machine:
         return self.goto(*self.cfg["park"])
 
     def goto(self, x, y):
-        raise RuntimeError(
-            "movimiento automatico de workflow suspendido; usa Mover 1/2 "
-            "en Print and Cut para el viaje nativo de prueba")
+        # Mismo viaje nativo que Mover 1/2. Panel.move_to (pulsos de teclado)
+        # sigue sin estar disponible: no se reintroduce la interpolacion.
+        return self.goto_native(x, y)
 
     def goto_native(self, x, y):
         if not ruida.NATIVE_POSITION_MOVE_ENABLED:

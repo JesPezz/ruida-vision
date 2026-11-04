@@ -320,7 +320,9 @@ class Panel:
     # (dos pulsos de 1 ms dan los mismos 0.219 mm), asi que un bucle cerrado
     # converge a esa rejilla.
     JOG = {"+X": 0x01, "-X": 0x02, "-Y": 0x03, "+Y": 0x04}
-    AUTOMATIC_MOVE_ENABLED = False
+    # El movimiento automatico de workflow (estacionar, calibrate, run) usa el
+    # comando nativo D9 via Machine.goto, no los pulsos de Panel.move_to.
+    AUTOMATIC_MOVE_ENABLED = True
     # Medido en esta maquina (1..100 ms), ver README:
     #   1 ms -> 0.219 mm   10 ms -> 0.498   50 ms -> 2.264   100 ms -> 6.150
     # o sea ~0.19 mm de tiempo muerto + 0.066 mm/ms. Con pulsos largos la
@@ -871,14 +873,14 @@ def selftest():
     pn.jog_hold = jog_con_lectura_tardia
     p = pn._ir_hacia("+X", 205.0, margen=3.0, desde=(190.0, 200.0))
     assert p == (210.0, 200.0), p
-    assert not Panel.AUTOMATIC_MOVE_ENABLED
+    assert Panel.AUTOMATIC_MOVE_ENABLED
     pn.s.sent[:] = []
     try:
         pn.move_to(300.0, 200.0, verbose=False)
         raise AssertionError("Panel.move_to permitio un destino automatico")
     except RuntimeError as e:
         assert "Panel.move_to no esta disponible" in str(e), str(e)
-    assert not pn.s.sent, "move_to envio teclas aunque esta suspendido"
+    assert not pn.s.sent, "move_to envio teclas aunque no esta disponible"
     # Un jog con polaridad fisica invertida debe abortar cerca del inicio,
     # no seguir hasta el limite seguro del eje.
     wrong_pos = [200.0, 200.0]
