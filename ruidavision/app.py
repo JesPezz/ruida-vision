@@ -120,6 +120,18 @@ PASOS = {"minus": -1, "KP_Subtract": -1, "plus": 1, "KP_Add": 1, "equal": 1}
 SIN_CAM = "camaras: sin abrir (pulsa Conectar)"
 LASER = "LASER APAGADO: esto mueve el cabezal, no dispara"
 
+# Paleta de la app de Agenda Escolar: Material 3 oscuro con verde de acento.
+FONDO = "#020617"
+PANEL = "#0f172a"
+PANEL2 = "#1e293b"
+BORDE = "#334155"
+TEXTO = "#e2e8f0"
+TEXTO2 = "#cbd5e1"
+MUTED = "#94a3b8"
+VERDE = "#009540"
+VERDE2 = "#00b34d"
+ROJO = "#ef4444"
+
 
 def _dpi_awareness():
     """Que Windows no deforme la ventana en pantallas con escalado.
@@ -280,7 +292,7 @@ class Foto(tk.Canvas):
     """
 
     def __init__(self, padre, al_clic=None):
-        super().__init__(padre, bg="#0d0d0d", height=320, highlightthickness=0)
+        super().__init__(padre, bg=FONDO, height=320, highlightthickness=0)
         self.al_clic, self.cruz = al_clic, None
         self.foto = None
         self.detectadas = []
@@ -374,59 +386,6 @@ class Foto(tk.Canvas):
         self.al_clic(x, y)
 
 
-class Deslizable(ttk.Frame):
-    """Una hoja que cabe en la ventana y se desplaza si no cabe entera.
-
-    Marcas lleva los cinco pasos escritos, el visor, la lista de coordenadas y
-    los otros dos parrafos: mas de 900 px de alto, y la ventana minima son 620.
-    Sin esto lo de abajo se ve a medias y no hay forma de llegar al final.
-
-    Solo para hojas de contenido FIJO. Vivo y Calibrar no llevan esto a proposito:
-    ahi lo que crece es el visor de las camaras, que necesita el `expand` del
-    `pack`, y dentro de un `Canvas` de scroll eso no existe (el hijo se queda en
-    su alto pedido)."""
-
-    def __init__(self, padre):
-        super().__init__(padre)
-        self.lienzo = tk.Canvas(self, highlightthickness=0, bd=0,
-                                background=ttk.Style().lookup("TFrame", "background")
-                                or self.cget("background"))
-        self.barra = ttk.Scrollbar(self, orient="vertical",
-                                   command=self.lienzo.yview)
-        self.lienzo.configure(yscrollcommand=self.barra.set)
-        self.lienzo.pack(side="left", fill="both", expand=True)
-        self.barra.pack(side="right", fill="y")
-        self.interior = ttk.Frame(self.lienzo, padding=8)
-        self._id = self.lienzo.create_window((0, 0), window=self.interior,
-                                             anchor="nw")
-        self.interior.bind("<Configure>", self._medida)
-        self.lienzo.bind("<Configure>", self._ancho)
-        # Windows manda la rueda a la ventana del FOCO, no al widget que hay
-        # debajo del raton: con el raton sobre el texto, sin esto no se
-        # desplaza. `bind_all` porque Tk no propaga la rueda a los hijos.
-        self.lienzo.bind_all("<MouseWheel>", self._rueda)
-
-    def _medida(self, e):
-        self.lienzo.configure(scrollregion=self.lienzo.bbox("all"))
-
-    def _ancho(self, e):
-        # El interior toma el ancho del lienzo: si no, se queda en el ancho que
-        # pidio al construir y el texto se parte por donde le da la gana.
-        self.lienzo.itemconfigure(self._id, width=e.width)
-
-    def _rueda(self, e):
-        w = e.widget
-        # Los widgets con scroll propio se desplazan ellos; el resto de la hoja,
-        # si.
-        if isinstance(w, (tk.Listbox, tk.Text, tk.Canvas, ttk.Treeview,
-                          ttk.Entry, tk.Entry, ttk.Combobox)):
-            return
-        if not (w is self or w is self.lienzo or str(w).startswith(str(self) + ".")):
-            return
-        self.lienzo.yview_scroll(-1 if e.delta > 0 else 1, "units")
-        return "break"
-
-
 # --------------------------------------------------------------------- la app
 
 class App(tk.Tk):
@@ -436,6 +395,7 @@ class App(tk.Tk):
         # surtido efecto en el PC de verdad.
         self.dpi = _dpi_awareness()
         super().__init__()
+        self.configure(bg=FONDO)
         self.title("Ruida Vision %s" % VERSION)
         self.geometry("1200x780")
         self.minsize(940, 620)
@@ -466,6 +426,7 @@ class App(tk.Tk):
         self.cal_thr = int(self.cfg.get("thr", 0))
         self.cal_min_area = max(40, int(self.cfg.get("min_area", 40)))
         self._jog_step_labels = []
+        self._btns_origen = []
         # Que visores en vivo hay que pintar en cada hoja. Se dibujan solo los de
         # la hoja visible: pintar los de las dos hojas cada 33 ms son seis
         # conversiones de imagen por segundo y frame que no se ven.
@@ -533,20 +494,59 @@ class App(tk.Tk):
 
     def _estilo(self):
         s = ttk.Style(self)
-        for t in ("vista", "winnative", "clam"):
+        for t in ("clam", "vista", "winnative"):
             if t in s.theme_names():
                 s.theme_use(t)
                 break
-        s.configure(".", font=("Segoe UI", 10))
-        s.configure("TButton", padding=(10, 6))
-        s.configure("Jog.TButton", padding=(1, 0), font=("Segoe UI", 8))
-        s.configure("Cabeza.TLabel", font=("Segoe UI", 15, "bold"))
-        s.configure("Aviso.TLabel", foreground="#b35c00", font=("Segoe UI", 10, "bold"))
-        s.configure("Ok.TLabel", foreground="#0a7d33")
-        s.configure("Mal.TLabel", foreground="#b00020")
-        s.configure("Chico.TLabel", foreground="#666666")
-        s.configure("Treeview", rowheight=24)
-        s.configure("TLabelframe.Label", font=("Segoe UI", 10, "bold"))
+        s.configure(".", background=FONDO, foreground=TEXTO,
+                    fieldbackground=PANEL, font=("Segoe UI", 10),
+                    bordercolor=BORDE, lightcolor=PANEL, darkcolor=FONDO,
+                    troughcolor=FONDO)
+        s.configure("TFrame", background=FONDO)
+        s.configure("TLabel", background=FONDO, foreground=TEXTO)
+        s.configure("TButton", background=PANEL2, foreground=TEXTO,
+                    bordercolor=BORDE, focuscolor=VERDE, padding=(10, 6))
+        s.map("TButton",
+              background=[("active", BORDE), ("pressed", VERDE)],
+              foreground=[("disabled", MUTED)])
+        s.configure("Acento.TButton", background=VERDE, foreground="#ffffff",
+                    bordercolor=VERDE, font=("Segoe UI", 10, "bold"),
+                    padding=(12, 7))
+        s.map("Acento.TButton",
+              background=[("active", VERDE2), ("pressed", VERDE2)],
+              foreground=[("disabled", MUTED)])
+        s.configure("Jog.TButton", padding=(1, 0), font=("Segoe UI", 8),
+                    background=PANEL2, foreground=TEXTO, bordercolor=BORDE)
+        s.configure("Cabeza.TLabel", font=("Segoe UI", 17, "bold"),
+                    foreground=TEXTO)
+        s.configure("Aviso.TLabel", foreground="#fbbf24", background=FONDO,
+                    font=("Segoe UI", 10, "bold"))
+        s.configure("Ok.TLabel", foreground="#34d399", background=FONDO)
+        s.configure("Mal.TLabel", foreground="#f87171", background=FONDO)
+        s.configure("Chico.TLabel", foreground=MUTED, background=FONDO)
+        s.configure("TLabelframe", background=FONDO, bordercolor=BORDE,
+                    relief="groove")
+        s.configure("TLabelframe.Label", background=FONDO, foreground=TEXTO2,
+                    font=("Segoe UI", 10, "bold"))
+        s.configure("TNotebook", background=FONDO, borderwidth=0)
+        s.configure("TNotebook.Tab", background=PANEL, foreground=MUTED,
+                    padding=(14, 7), font=("Segoe UI", 10, "bold"))
+        s.map("TNotebook.Tab",
+              background=[("selected", PANEL2)],
+              foreground=[("selected", TEXTO)])
+        s.configure("TEntry", fieldbackground=PANEL, foreground=TEXTO,
+                    insertcolor=TEXTO, bordercolor=BORDE, padding=6)
+        s.configure("TCombobox", fieldbackground=PANEL, background=PANEL2,
+                    foreground=TEXTO, arrowcolor=MUTED,
+                    bordercolor=BORDE, padding=5)
+        s.configure("Treeview", background=PANEL, fieldbackground=PANEL,
+                    foreground=TEXTO, rowheight=26, bordercolor=BORDE)
+        s.map("Treeview", background=[("selected", VERDE)],
+              foreground=[("selected", "#ffffff")])
+        s.configure("Treeview.Heading", background=PANEL2, foreground=TEXTO2,
+                    font=("Segoe UI", 10, "bold"))
+        s.configure("TScrollbar", background=PANEL2, troughcolor=FONDO,
+                    bordercolor=FONDO, arrowcolor=MUTED)
 
     def _cabecera(self):
         f = ttk.Frame(self, padding=(10, 8))
@@ -565,7 +565,8 @@ class App(tk.Tk):
         # ve nunca, que es justo lo que uno busca en el registro.
         marco = ttk.Frame(self)
         marco.pack(fill="both", side="bottom", padx=8, pady=(4, 0))
-        self.txt = tk.Text(marco, height=7, bg="#101418", fg="#cfd8dc",
+        self.txt = tk.Text(marco, height=7, bg=PANEL, fg=TEXTO2,
+                           insertbackground=TEXTO,
                            font=("Consolas", 9), wrap="word", state="disabled")
         barra = ttk.Scrollbar(marco, orient="vertical", command=self.txt.yview)
         self.txt.configure(yscrollcommand=barra.set)
@@ -645,19 +646,14 @@ class App(tk.Tk):
         return f
 
     # ------------------------------------------------------------ hoja "vivo"
-    def _hoja_vivo(self):
-        h = ttk.Frame(self.hojas, padding=8)
-        self.hojas.add(h, text="  Vivo  ")
-        self.i_vivo = self.hojas.index(h)
-        b = ttk.Frame(h)
+    def _barra_camaras(self, padre):
+        """Los cinco botones de camara, iguales en Camaras y en Marcas."""
+        b = ttk.Frame(padre)
         b.pack(fill="x")
-        # Los botones van en grid y en dos filas, no en un pack de una: con los
-        # nombres encima todo en una fila pedia 1500 px y en una ventana de 1200
-        # el ultimo boton ("Buscar camaras") quedaba fuera, sin verse. Wrap por
-        # filas, que es lo que hace la gente en papel.
-        # "Estacionar" no esta: iba al estacionamiento de calib.json (20,20) y
-        # "Origen 0,0" va a la esquina, que a 20 mm de diferencia es el mismo
-        # sitio. Dos botones para el mismo movimiento era una duda por trabajo.
+        # Los botones van en grid y en una fila: caben a 940 px. "Estacionar"
+        # no esta: iba al estacionamiento de calib.json (20,20) y "Origen 0,0"
+        # va a la esquina, que a 20 mm de diferencia es el mismo sitio. Dos
+        # botones para el mismo movimiento era una duda por trabajo.
         for col, (nombre, accion) in enumerate((
                 ("Conectar camaras", self.conectar),
                 ("Desconectar", self.parar_cams),
@@ -665,12 +661,22 @@ class App(tk.Tk):
                 ("Origen 0,0", lambda: self.ir_a(0.0, 0.0)),
                 ("Buscar camaras", self.scan_cams),
         )):
-            btn = boton(b, nombre, accion)
-            if nombre == "Origen 0,0" and not ruida.NATIVE_POSITION_MOVE_ENABLED:
-                btn.configure(state="disabled")
+            estilo = "Acento.TButton" if nombre == "Conectar camaras" else "TButton"
+            btn = boton(b, nombre, accion, style=estilo)
             if nombre == "Origen 0,0":
-                self.btn_origen = btn
+                self._btns_origen.append(btn)
+                if not hasattr(self, "btn_origen"):
+                    self.btn_origen = btn
+                if not ruida.NATIVE_POSITION_MOVE_ENABLED:
+                    btn.configure(state="disabled")
             btn.grid(row=0, column=col, padx=2, sticky="w")
+        return b
+
+    def _hoja_vivo(self):
+        h = ttk.Frame(self.hojas, padding=8)
+        self.hojas.add(h, text="  Camaras  ")
+        self.i_vivo = self.hojas.index(h)
+        b = self._barra_camaras(h)
         # El paso, como en LightBurn: un numero que se sube y se baja con -/+
         # en saltos de 0.1, sin desplegable. El desplegable obligaba a soltar el
         # WASD justo cuando hace falta el paso fino, que es con el cabezal en
@@ -695,8 +701,11 @@ class App(tk.Tk):
 
         cuerpo = ttk.Frame(h)
         cuerpo.pack(fill="both", expand=True, pady=6)
-        self.im_top = self._marco(cuerpo, "CENITAL")
-        self.im_head = self._marco(cuerpo, "CABEZAL (microscopio)")
+        cuerpo.columnconfigure(0, weight=1, uniform="visor")
+        cuerpo.columnconfigure(1, weight=1, uniform="visor")
+        cuerpo.rowconfigure(0, weight=1)
+        self.im_top = self._marco(cuerpo, "CENITAL", celda=(0, 0))
+        self.im_head = self._marco(cuerpo, "CABEZAL (microscopio)", celda=(0, 1))
         self.vivos[self.i_vivo] = (self.im_top, self.im_head)
 
         m = ttk.Frame(h)
@@ -717,7 +726,7 @@ class App(tk.Tk):
             f.grid(row=celda[0], column=celda[1], padx=4, pady=4, sticky="nsew")
         else:
             f.pack(side="left", fill="both", expand=True, padx=4)
-        lab = tk.Label(f, bg="#0d0d0d", text="sin imagen", anchor="center",
+        lab = tk.Label(f, bg=PANEL, fg=MUTED, text="sin imagen", anchor="center",
                        font=("Consolas", 9), height=alto, width=42)
         lab.pack(fill="both", expand=True)
         return lab
@@ -1492,46 +1501,26 @@ class App(tk.Tk):
 
     # --------------------------------------------------------- hoja "marcas"
     def _hoja_marcas(self):
-        # Deslizable y no un Frame: esta hoja es la unica con texto fijo que no
-        # cabe en la ventana minima.
-        hoja = Deslizable(self.hojas)
-        self.hojas.add(hoja, text="  Marcas (Print and Cut)  ")
-        self.i_marcas = self.hojas.index(hoja)
-        self.hoja_marcas = hoja
-        h = hoja.interior
-        x0, y0, x1, y1 = hv.area_trabajo()
-        ttk.Label(h, text=(
-            "Como va, paso a paso:  1) pon la plantilla en el centro del area de "
-            "trabajo y pulsa Detectar los dos puntos: la maquina mira la hoja, descarta las "
-            "manchas que caen FUERA del area de %g x %g mm y marca en verde solo las "
-            "dos del material, como 1 y 2.  2) Pulsa Mover: el cabezal va al punto 1 "
-            "y el boton pasa a Mover 2.  3) Con el cabezal ya ahi, anota el X y la Y "
-            "que salen abajo y ponlos en LightBurn > Print and Cut como primer punto. "
-            "4) Vuelve y pulsa Mover 2: el cabezal va al punto 2, y a partir de ahi "
-            "pon DESACTIVADO el offset de la camara en LightBurn, que aqui ya esta "
-            "sumado.  5) Anota el X y la Y del punto 2 y ponlos como segundo punto. "
-            "Las dos camaras se desconectan mientras dura el calculo: el puerto del "
-            "panel es uno solo." % (x1 - x0, y1 - y0)),
-            style="Chico.TLabel", wraplength=980, justify="left").pack(
-            anchor="w", pady=(0, 4))
+        h = ttk.Frame(self.hojas, padding=8)
+        self.hojas.add(h, text="  Marcas (Print and Cut)  ")
+        self.i_marcas = self.hojas.index(h)
+        self.hoja_marcas = h
+        self._barra_camaras(h)
 
         b = ttk.Frame(h)
-        b.pack(fill="x")
-        # Dos filas como en Vivo y Calibrar, por el mismo motivo que ahi: esta
-        # fila pedia 1519 px y en una ventana de 1200 los botones de la derecha
-        # solo se veian porque el marco los recortaba. Arriba lo que se pulsa,
-        # abajo los numeros que se cambian.
+        b.pack(fill="x", pady=(4, 0))
         f0 = ttk.Frame(b)
         f0.pack(fill="x")
         f1 = ttk.Frame(b)
         f1.pack(fill="x", pady=(3, 0))
         self.lbl_marcas = ttk.Label(f0, text="", style="Ok.TLabel")
         self.lbl_marcas.pack(side="left")
-        boton(f0, "Detectar los dos puntos", self.detectar).pack(
-            side="left", padx=(8, 2))
+        boton(f0, "Detectar los dos puntos", self.detectar,
+              style="Acento.TButton").pack(side="left", padx=(8, 2))
         self.btn_mover = boton(f0, "Mover", self.mover_marca)
         self.btn_mover.pack(side="left", padx=2)
-        self.btn_run_marcas = boton(f0, "Detectar y centrar los 2", self.run_marcas)
+        self.btn_run_marcas = boton(f0, "Detectar y centrar los 2", self.run_marcas,
+                                    style="Acento.TButton")
         self.btn_run_marcas.pack(side="left", padx=(14, 2))
         if not ruida.Panel.AUTOMATIC_MOVE_ENABLED:
             self.btn_run_marcas.configure(state="disabled")
@@ -1546,8 +1535,7 @@ class App(tk.Tk):
         self.v_roi.pack(side="left", padx=4)
 
         # Lo que se copia a mano en LightBurn: la posicion REAL que tiene el
-        # cabezal en este punto. Es la que se lee, no la que se calculo, y es
-        # por eso que ya no hace falta copiar y pegar nada.
+        # cabezal en este punto. Es la que se lee, no la que se calculo.
         d = ttk.LabelFrame(h, text="Punto a registrar en LightBurn", padding=6)
         d.pack(fill="x", pady=(6, 0))
         self.lbl_punto = ttk.Label(d, text="sin punto: pulsa Detectar los dos puntos",
@@ -1559,41 +1547,16 @@ class App(tk.Tk):
 
         cuerpo = ttk.Frame(h)
         cuerpo.pack(fill="both", expand=True, pady=6)
-        cuerpo.columnconfigure(0, weight=1)
-        cuerpo.columnconfigure(1, weight=0, minsize=360)
+        cuerpo.columnconfigure(0, weight=1, uniform="visor")
+        cuerpo.columnconfigure(1, weight=1, uniform="visor")
         cuerpo.rowconfigure(0, weight=1)
-        self.foto_marcas = Foto(cuerpo)
-        self.foto_marcas.grid(row=0, column=0, sticky="nsew")
-        panel_lateral = ttk.Frame(cuerpo, width=360)
-        panel_lateral.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-        panel_lateral.grid_propagate(False)
-        panel_lateral.columnconfigure(0, weight=1)
-        panel_lateral.rowconfigure(0, weight=4)
-        panel_lateral.rowconfigure(2, weight=1)
+        marco_foto = ttk.LabelFrame(cuerpo, text="CENITAL (foto)", padding=4)
+        marco_foto.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        self.foto_marcas = Foto(marco_foto)
+        self.foto_marcas.pack(fill="both", expand=True)
         self.im_marcas_head = self._marco(
-            panel_lateral, "CABEZAL (en vivo)", alto=6, celda=(0, 0))
-        self.im_marcas_head.master.grid_configure(
-            sticky="nsew", pady=(0, 4))
+            cuerpo, "CABEZAL (en vivo)", celda=(0, 1))
         self.vivos[self.i_marcas] = (None, self.im_marcas_head)
-        self._controles_jog(panel_lateral).grid(
-            row=1, column=0, sticky="ew", pady=(0, 4))
-        self.lst = tk.Listbox(panel_lateral, font=("Consolas", 10), height=3,
-                              bg="#101418", fg="#cfd8dc", activestyle="none")
-        self.lst.grid(row=2, column=0, sticky="nsew")
-        self.lst.bind("<<ListboxSelect>>", self._copia_una)
-        ttk.Label(h, text="La foto muestra la deteccion; a la derecha estan el visor "
-                          "del cabezal, el jog manual y las coordenadas. Clic en "
-                          "una coordenada = copiarla.",
-                  style="Chico.TLabel", wraplength=980, justify="left").pack(anchor="w")
-        ttk.Label(h, text="Detectar y centrar los 2 hace todo seguido: estaciona, "
-                          "detecta y lleva el cabezal a cada marca. Mover 1 / Mover 2 "
-                          "siguen disponibles para ir paso a paso.",
-                  style="Chico.TLabel", wraplength=980, justify="left").pack(anchor="w")
-        ttk.Label(h, text="Mover usa el viaje nativo de LightBurn a coordenadas; "
-                          "no simula teclas. El viaje no se puede cancelar desde la "
-                          "app: deja libre el recorrido y usa el paro fisico ante "
-                          "una emergencia. Cierra LightBurn antes de mover.",
-                  style="Aviso.TLabel", wraplength=980, justify="left").pack(anchor="w")
         self.marcas2 = []             # [(mm, mm)] de los dos puntos del material
         self.i_marca = 0              # a cual va el boton Mover
 
@@ -1674,11 +1637,11 @@ class App(tk.Tk):
             state="normal")
 
     def _boton_origen(self):
-        if not ruida.NATIVE_POSITION_MOVE_ENABLED or self._native_move_fault:
-            self.btn_origen.configure(state="disabled")
-        else:
-            self.btn_origen.configure(
-                state="disabled" if self._native_move_active else "normal")
+        estado = "disabled"
+        if ruida.NATIVE_POSITION_MOVE_ENABLED and not self._native_move_fault:
+            estado = "disabled" if self._native_move_active else "normal"
+        for btn in getattr(self, "_btns_origen", []):
+            btn.configure(state=estado)
 
     def mover_marca(self):
         """Pasos 3 y 4: llevar el cabezal al punto 1 y luego al punto 2."""
@@ -1947,7 +1910,6 @@ class App(tk.Tk):
         if self.maq.mq:
             self.log("se suelta el panel del cabezal: el puerto es uno solo")
             self.maq.cerrar()
-        self.lst.delete(0, "end")
         self.coords = []
         self._tarea(fn, ns, top_getter=top_getter, head_getter=head_getter,
                     al_terminar=self._fin_marcas)
@@ -2030,19 +1992,11 @@ class App(tk.Tk):
         if not fallo and os.path.exists(COORDS):
             self.coords = [l.strip() for l in
                            open(COORDS, encoding="utf-8").read().splitlines() if l.strip()]
-            self.lst.delete(0, "end")
-            for l in self.coords:
-                self.lst.insert("end", l)
         elif not fallo:
-            self.lst.insert("end", "sin coordenadas: mira el registro de abajo")
+            self.log("sin coordenadas: mira el registro de abajo")
         if self._volvio and (not self.video or not self.video.is_alive()):
             self.video = None
             self.conectar()
-
-    def _copia_una(self, _):
-        s = self.lst.curselection()
-        if s:
-            self.pegar(self.lst.get(s[0]))
 
     def copiar(self):
         if not self.coords:

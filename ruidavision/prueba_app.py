@@ -420,6 +420,21 @@ def main():
         # sin depender del escalado.
         and app.im_marcas_head.winfo_height()
         >= app.im_marcas_head.winfo_width() // 5)
+    marco_foto = app.foto_marcas.master
+    marco_head = app.im_marcas_head.master
+    chk("los visores de Marcas miden lo mismo (%d x %d / %d x %d)"
+        % (marco_foto.winfo_width(), marco_foto.winfo_height(),
+           marco_head.winfo_width(), marco_head.winfo_height()),
+        abs(marco_foto.winfo_width() - marco_head.winfo_width()) <= 2
+        and abs(marco_foto.winfo_height() - marco_head.winfo_height()) <= 2)
+    app.hojas.select(app.i_vivo)
+    app.update()
+    vivo = (app.im_top.master.winfo_width(), app.im_top.master.winfo_height())
+    app.hojas.select(app.i_marcas)
+    app.update()
+    marca = (marco_foto.winfo_width(), marco_foto.winfo_height())
+    chk("Marcas usa el ancho de los visores de Camaras (%s / %s)" % (vivo, marca),
+        abs(vivo[0] - marca[0]) <= 2)
     # El reparto de los cuatro: los dos visores en vivo, la foto congelada y la
     # tabla de puntos. Medianamente era un PanedWindow con la izquierda al 75% y
     # la foto encima de las camaras, y el reparto salia como salia. Ahora es
@@ -452,13 +467,13 @@ def main():
     cosas = todos(app)
     bts = [w for w in cosas if w.winfo_class() == "TButton"]
     nombres = [w.cget("text") for w in bts]
-    chk("Print and Cut dispone del jog manual compacto",
-        all(nombres.count(name) >= 3 for name in ("+Y", "+X", "-Y", "-X")))
+    chk("Calibrar dispone del jog manual compacto",
+        all(nombres.count(name) >= 2 for name in ("+Y", "+X", "-Y", "-X")))
     jog_buttons = [w for w in bts if w.cget("style") == "Jog.TButton"]
     jog_tamanos = [(w.cget("text"), w.winfo_width(), w.winfo_height())
                     for w in jog_buttons]
     chk("los botones de jog son compactos %s" % ascii(jog_tamanos),
-        len(jog_buttons) >= 10 and max(w.winfo_width() for w in jog_buttons) < 55
+        len(jog_buttons) >= 6 and max(w.winfo_width() for w in jog_buttons) < 55
         and max(w.winfo_height() for w in jog_buttons) < 30)
     Iconos = set("⌂◉○⏹⊕◫⧉▤⟳◎➜▶▲▼◀✓⌦✕⇅# ")
     chk("los botones llevan el nombre, no un icono",
@@ -484,7 +499,7 @@ def main():
     chk("los botones de mover dicen el eje (+Y, +X, -Y, -X)",
         [t for t in nombres if t in ("+Y", "+X", "-Y", "-X")][:4]
         == ["+Y", "+X", "-Y", "-X"]
-        and all(nombres.count(t) >= 3 for t in ("+Y", "+X", "-Y", "-X")))
+        and all(nombres.count(t) >= 2 for t in ("+Y", "+X", "-Y", "-X")))
     app._boton_mover()
     chk("Mover avisa de que no hay puntos", app.btn_mover.cget("text") == "Mover"
         and "disabled" in str(app.btn_mover.state()))
@@ -529,38 +544,12 @@ def main():
     medidos_textos = sum(len(p) for p in texts.values())
     chk("ningun texto con wraplength se sale a 1200/940 px (%d mirados, fuera: %s)"
         % (medidos_textos, fuera or "ninguno"),
-        not fuera and medidos_textos >= 4)
+        not fuera and medidos_textos >= 2)
     app.geometry("1200x780")
     app.update()
 
-    # Marcas lleva los cinco pasos, el visor, la lista y dos parrafos mas: unos
-    # 680 px de alto a 1200 de ancho, y la ventana minima son 620. Sin scroll lo
-    # de abajo no se ve y no hay forma de llegar. Pero en un monitor alto el
-    # texto cabe entero (en el PC de Windows, 678 px en 700) y entonces no hay
-    # nada que comprobar, ni que la ventana se pueda encoger por `geometry`
-    # (alli el resize no se aplica). Asi que se mete un separador gigante: el
-    # scroll tiene que aparecer y llegar al final en cualquier pantalla.
-    ms = app.hoja_marcas
-    hoja_antes = app.hojas.index("current")
-    app.hojas.select(ms)
-    app.update()
-    separador = A.ttk.Frame(ms.interior, height=3000)
-    separador.pack()
-    app.update_idletasks()
-    bombea(app, 0.3)
-    alto = (ms.lienzo.bbox("all") or (0, 0, 0, 0))[3]
-    chk("la hoja de Marcas se desplaza (%d px de texto en %d de alto)"
-        % (alto, ms.lienzo.winfo_height()), alto > ms.lienzo.winfo_height())
-    ms.lienzo.yview_moveto(1.0)
-    app.update()
-    chk("se llega al final del texto de Marcas", ms.lienzo.yview()[1] == 1.0)
-    separador.pack_forget()
-    ms.lienzo.yview_moveto(0.0)
-    app.update()
     chk("al cambiar de hoja el foco vuelve a la ventana (teclear no se queda "
         "en un Entry de la hoja que ya no se ve)", not app._escribiendo())
-    app.hojas.select(hoja_antes)        # como estaba: las pruebas de abajo
-    app.update()                         # cuentan con la hoja que sea
     # `_cambio_hoja` deja el corte del jog pendiente 60 ms (`_suelta` -> after),
     # y mientras ese after no salta `ir_a` dice "suelta primero el control de
     # jog" y no viaja al origen. Es lo que pasa de verdad en la app, asi que
@@ -640,7 +629,7 @@ def main():
         app._fin_marcas(SimpleNamespace(result=lambda: expected))
         chk("al terminar el run se ve la foto de la cama",
             getattr(app.foto_marcas, "foto", None) is not None)
-        chk("las coordenadas van a la lista", len(app.lst.get(0, "end")) == 2)
+        chk("las coordenadas se guardan", len(app.coords) == 2)
         chk("el visor pinta los mismos pixeles devueltos por la deteccion",
             app.marcas_utiles == [tuple(mark[1]) for mark in expected])
         chk("las coordenadas mostradas corresponden a las marcas seleccionadas",

@@ -111,14 +111,14 @@ LightBurn cerrado.
 
 ## Manual de usuario
 
-La ventana tiene cuatro pestañas: **Vivo**, **Calibrar**, **Marcas (Print and
-Cut)** y **Ajustes**. Abajo hay un registro de 7 líneas y el botón **Ver
-registro**, que abre `app.log`.
+La ventana tiene cuatro pestañas: **Cámaras**, **Calibrar**, **Marcas (Print and
+Cut)** y **Ajustes**, con un tema oscuro de alto contraste. Abajo hay un
+registro de 7 líneas y el botón **Ver registro**, que abre `app.log`.
 
 La cabecera muestra la versión, el aviso **LASER APAGADO**, el estado del panel
 (IP y si contesta) y el estado de las cámaras.
 
-### Vivo
+### Cámaras
 
 Vista de las dos cámaras y los controles de movimiento manual.
 
@@ -265,7 +265,9 @@ Prepara la plantilla en el centro del área de trabajo, con el láser apagado y
 LightBurn cerrado. El cabezal debe estar en una esquina (por ejemplo con
 **Origen 0,0**) para que no tape una marca en la foto.
 
-La hoja tiene dos caminos: el automático y el paso a paso.
+La hoja usa la misma barra de cámaras y los mismos visores grandes que
+**Cámaras**: a la izquierda la foto cenital con las marcas detectadas y a la
+derecha el cabezal en vivo. Tiene dos caminos: el automático y el paso a paso.
 
 #### Opción A: Detectar y centrar los 2
 
@@ -278,8 +280,8 @@ La hoja tiene dos caminos: el automático y el paso a paso.
    dentro** (disco con cruz o aro con la cruz dentro); los discos lisos, aros
    sin cruz, cuadrados y texto de los diseños impresos se descartan aunque la
    hoja esté sin tapar.
-3. Al terminar, las coordenadas reales quedan en la lista y en `coords.txt`.
-   Usa **Copiar coordenadas** o **Ver coords.txt**.
+3. Al terminar, las coordenadas reales quedan en `coords.txt`. Usa **Copiar
+   coordenadas** o **Ver coords.txt**.
 
 Es el camino más cómodo, pero mueve solo: deja el recorrido libre y el láser
 apagado. El viaje nativo **no se puede cancelar desde la app**.
@@ -308,8 +310,7 @@ dentro; evita que la cruz quede fuera del tag o partida por el umbral.
 
 #### Coordenadas y LightBurn
 
-- **Copiar coordenadas** copia la lista al portapapeles. Un clic en una línea
-  de la lista copia solo esa.
+- **Copiar coordenadas** copia el contenido de `coords.txt` al portapapeles.
 - **Ver coords.txt** abre el archivo de la última tarea.
 - En LightBurn, marca **2 puntos**, desactiva el offset de cámara y usa
   **Obtener coordenadas** para llevar el X/Y de cada punto.
