@@ -272,9 +272,12 @@ La hoja tiene dos caminos: el automático y el paso a paso.
 1. Ajusta **marcas** (normalmente 2), **iteraciones** (4), **tolerancia mm**
    (0,1) y, si hace falta, **ROI mm x0,y0,x1,y1**.
 2. Pulsa **Detectar y centrar los 2**. La app estaciona, mira la cama, descarta
-   lo que cae fuera del área de trabajo, elige las dos manchas y lleva el
+   lo que cae fuera del área de trabajo, elige las dos marcas y lleva el
    cabezal a cada una con el viaje nativo. Después centra cada marca con la
-   cámara del cabezal.
+   cámara del cabezal. El detector solo acepta **tags redondos con cruz
+   dentro** (disco con cruz o aro con la cruz dentro); los discos lisos, aros
+   sin cruz, cuadrados y texto de los diseños impresos se descartan aunque la
+   hoja esté sin tapar.
 3. Al terminar, las coordenadas reales quedan en la lista y en `coords.txt`.
    Usa **Copiar coordenadas** o **Ver coords.txt**.
 
@@ -284,8 +287,8 @@ apagado. El viaje nativo **no se puede cancelar desde la app**.
 #### Opción B: paso a paso con Mover
 
 1. **Detectar los dos puntos**: foto cenital, descarta lo que cae fuera de la
-   cama y elige las dos manchas de mayor área. No mueve el cabezal. Las marcas
-   se numeran 1 y 2 en la foto.
+   cama y busca los dos **tags con cruz**. No mueve el cabezal. Las marcas se
+   numeran 1 y 2 en la foto; los diseños impresos no compiten con ellas.
 2. **Mover** (luego *Mover 1* / *Mover 2*): lleva el cabezal a cada marca con el
    viaje nativo, confirma la llegada y hace el centrado fino. El botón cambia
    solo de *Mover 1* a *Mover 2*.
@@ -298,9 +301,10 @@ apagado. El viaje nativo **no se puede cancelar desde la app**.
 5. Vuelve, pulsa **Mover 2**, repite con el segundo punto y corta desde
    LightBurn.
 
-Si la detección elige mal, ajusta **Umbral** y **Área mínima** en Ajustes o
-acota la búsqueda con el **ROI**. Cada marca debe ser **una sola mancha oscura
-continua**: un aro con la cruz separada dentro cuenta como dos componentes.
+Si no aparecen las dos marcas, revisa que la cruz se vea y que ninguna quede
+tapada; ajusta **Umbral** y **Área mínima** en Ajustes o acota la búsqueda con
+el **ROI**. Sirven tanto un disco con la cruz dentro como un aro con la cruz
+dentro; evita que la cruz quede fuera del tag o partida por el umbral.
 
 #### Coordenadas y LightBurn
 
@@ -328,7 +332,7 @@ Campos:
 | **Estacionamiento X,Y mm** | `park`; destino de **1. Estacionar** y del CLI. |
 | **FOV cabezal mm** | `head_fov_mm`; lo mide **3. Medir FOV**. |
 | **Marcas a detectar** | `marks`; normalmente 2. |
-| **Umbral de negro (0=automatico)** | `thr`; afecta a la detección de Print and Cut. |
+| **Umbral de negro (0=automático)** | `thr`; afecta a la detección de Print and Cut. Con `0` se adapta a la luz desigual de la cama. |
 | **Area minima px** | `min_area`; afecta a la detección de Print and Cut. |
 | **Desplazamiento X,Y mm** | `cam_offset_mm`; cámara menos láser. |
 

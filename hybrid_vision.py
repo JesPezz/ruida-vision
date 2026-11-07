@@ -186,9 +186,49 @@ def fit_circulo(mascara):
             my + (suu * v.sum() - suv * u.sum()) / (2.0 * den))
 
 
+def _cross_score(patch):
+    """Cuanto se separa el centro de los flancos, en varias orientaciones.
+
+    Un disco liso, un aro o un cuadrado dan casi cero. El tag de Print and Cut
+    (disco oscuro con cruz clara, o cruz oscura en un aro) da alto: la linea que
+    pasa por el centro cae sobre la cruz y las paralelas de al lado caen sobre
+    el fondo. Se prueban 12 angulos para que no importe como este girada la hoja.
+    """
+    h, w = patch.shape
+    if min(h, w) < 12:
+        return 0.0
+    cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
+    r = 0.46 * min(h, w)
+
+    def at(x, y):
+        x = min(max(x, 0.0), w - 1.001)
+        y = min(max(y, 0.0), h - 1.001)
+        x0, y0 = int(x), int(y)
+        fx, fy = x - x0, y - y0
+        p00 = float(patch[y0, x0])
+        p10 = float(patch[y0, x0 + 1])
+        p01 = float(patch[y0 + 1, x0])
+        p11 = float(patch[y0 + 1, x0 + 1])
+        return (p00 * (1 - fx) + p10 * fx) * (1 - fy) + \
+               (p01 * (1 - fx) + p11 * fx) * fy
+
+    mejor = 0.0
+    for ang in np.linspace(0, math.pi, 12, endpoint=False):
+        ca, sa = math.cos(ang), math.sin(ang)
+        centro = [at(cx + ca * r * t, cy + sa * r * t)
+                  for t in np.linspace(-0.32, 0.32, 9)]
+        flancos = []
+        for off in (-0.28, 0.28):
+            flancos.extend(at(cx + ca * r * t - sa * r * off,
+                              cy + sa * r * t + ca * r * off)
+                           for t in np.linspace(-0.32, 0.32, 9))
+        mejor = max(mejor, abs(np.mean(centro) - np.mean(flancos)))
+    return float(mejor)
+
+
 def find_marks(gray, roi=None, min_area=8, max_area=40000, thr=0, merge=1,
                show=False, min_circularity=0.0, max_aspect_ratio=float("inf"),
-               forma="centroide"):
+               forma="centroide", close=0, min_cross=0.0, adaptive=None):
     """Marcas de registro: componentes oscuros de area plausible, centro
     subpixel por momentos. `min_circularity` permite excluir textura, reflejos
     y bordes cuando la vista solo debe resaltar marcas redondas.
@@ -203,13 +243,33 @@ def find_marks(gray, roi=None, min_area=8, max_area=40000, thr=0, merge=1,
     y el de una cruz concentricos caen ambos en el centro del tag, agrupar por
     centroide las junta sin depender de la separacion entre aro y cruz, que
     cambia con el tamano. Los tags sueltos de la cama van tan lejos que no se
-    tocan."""
+    tocan.
+
+    `close` aplica un cierre morfologico de ese tamano antes de etiquetar: une
+    los trozos de una marca rota por brillos o por el borde de la hoja. Es
+    pequeno (3 px) para no juntar manchas vecinas.
+
+    `min_cross` exige que el componente tenga una cruz dentro (el tag de Print
+    and Cut) y descarta discos lisos, aros y cuadrados de los disenos impresos.
+    Se mide con `_cross_score` sobre el recorte del componente.
+
+    `adaptive=(bloque, C)` usa umbral adaptativo en vez de Otsu. Sirve cuando la
+    luz no es uniforme y una de las dos marcas sale mucho mas clara que la otra:
+    Otsu se queda con la oscura y la clara se pierde. `thr` se ignora entonces."""
     x0, y0 = (roi[0], roi[1]) if roi else (0, 0)
     g = gray[y0:roi[3], x0:roi[2]] if roi else gray
-    if thr:
+    if adaptive:
+        block, c = adaptive
+        binimg = cv2.adaptiveThreshold(
+            g, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, int(block), float(c)) // 255
+    elif thr:
         binimg = (g < thr).astype(np.uint8)
     else:
         binimg = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1] // 255
+    if close:
+        binimg = cv2.morphologyEx(binimg, cv2.MORPH_CLOSE,
+                                  np.ones((int(close), int(close)), np.uint8))
     n, lab, stats, _ = cv2.connectedComponentsWithStats(binimg, 8)
     out = []
     for i in range(1, n):
@@ -233,6 +293,8 @@ def find_marks(gray, roi=None, min_area=8, max_area=40000, thr=0, merge=1,
             circularity = 4.0 * math.pi * cv2.contourArea(contour) / perimeter ** 2
             if circularity < min_circularity:
                 continue
+        if min_cross and _cross_score(g[y:y + h, x:x + w]) < min_cross:
+            continue
         if forma == "circulo":
             c = fit_circulo(component)
             if c is None:
@@ -847,7 +909,7 @@ def marcas_utiles(found, H, roi_mm=None):
     return dentro, fuera
 
 
-def cmd_run(a):
+def cmd_run(a, top_getter=None, head_getter=None):
     cfg = load_cfg()
     if "H" not in cfg:
         sys.exit("falta calib.json: ejecuta antes 'calibrate'")
@@ -862,9 +924,15 @@ def cmd_run(a):
     # Sin --roi manda el area de trabajo: es la zona donde la homografia esta
     # medida, y fuera de ella sus mm son suposiciones, no medidas.
     roi_mm = tuple(roi_mm) if roi_mm else area_trabajo()
-    m = Machine(cfg)
-    top = open_cam(cfg, "top")
-    head = open_cam(cfg, "head")
+    m = None
+    top = None
+    head = None
+    if not a.no_move:
+        m = Machine(cfg)
+    if top_getter is None:
+        top = open_cam(cfg, "top")
+    if not a.no_move and head_getter is None:
+        head = open_cam(cfg, "head")
     out = []
     try:
         if a.no_move:
@@ -872,10 +940,18 @@ def cmd_run(a):
             print("sin movimiento: solo deteccion desde el estacionamiento %s" % p)
         else:
             m.park()
-        g = grab(top, a.frames)
+        g = top_getter() if top_getter is not None else grab(top, a.frames)
         cv2.imwrite(BED_PNG, g)
+        # El tag de Print and Cut es un disco con una cruz dentro. Se exige
+        # circularidad alta y esa cruz: asi los disenos impresos (discos lisos,
+        # aros, cuadrados, texto) no se cuelan aunque esten sin tapar. Con thr=0
+        # se usa umbral adaptativo: la luz no siempre es uniforme y una marca
+        # puede salir mucho mas clara que la otra; Otsu se quedaria con una sola.
         found = find_marks(g, min_area=cfg["min_area"], max_area=cfg["max_area"],
-                           thr=cfg["thr"], show=a.debug)
+                           thr=cfg["thr"], show=a.debug,
+                           min_circularity=0.7, max_aspect_ratio=1.35,
+                           close=3, min_cross=25,
+                           adaptive=(81, 5) if not cfg["thr"] else None)
         print("marcas detectadas: %d" % len(found))
         if len(found) < marks_wanted:
             sys.exit("faltan marcas (%d de %d). Mira %s y "
@@ -920,13 +996,15 @@ def cmd_run(a):
             marks = [a_, b_]
         else:
             marks = marks[:marks_wanted]
+        foto = head_getter if head_getter is not None else (
+            lambda: grab(head, a.frames))
         for i, ((mx, my), (u, v)) in enumerate(marks, 1):
             print("marca %d: %.3f, %.3f mm (px %.1f, %.1f)" % (i, mx, my, u, v))
             if a.no_move:
                 out.append((mx, my))
                 continue
             m.goto(mx, my)
-            pos, problema = fine(m, lambda: grab(head, a.frames), cfg, a)
+            pos, problema = fine(m, foto, cfg, a)
             if problema:
                 # sys.exit y no un return: una posicion sin centrar es peor que
                 # ninguna, y apuntarla en LightBurn dispara donde no toca.
@@ -940,13 +1018,16 @@ def cmd_run(a):
         if a.no_move:
             return marks
     finally:
-        for c in (top, head):
-            c.release()
+        if top is not None:
+            top.release()
+        if head is not None:
+            head.release()
         try:
             pass  # el teclado no tiene comando de stop: se suelta con keyup
         except Exception as e:
             print("AVISO: stop no enviado: %s" % e)
-        m.close()
+        if m is not None:
+            m.close()
 
 
 def center_roi(w, h, frac=0.35):
@@ -1440,6 +1521,37 @@ def cmd_test(a):
         cv2.circle(g, (cx, 200), 20, 0, 2, cv2.LINE_AA)
     assert len(find_marks(g, merge=6)) == 2
     print("tag aro+cruz: OK (1 marca a cualquier radio, 2 tags separados = 2)")
+    # Print and Cut: los disenos impresos (disco liso, aro, cuadrado) no tienen
+    # la cruz del tag y no deben competir con las dos marcas reales.
+    g = np.full((400, 600), 255, np.uint8)
+    for cx in (100, 450):
+        cv2.circle(g, (cx, 150), 14, 60, -1)
+        cv2.line(g, (cx - 7, 150), (cx + 7, 150), 255, 2)
+        cv2.line(g, (cx, 143), (cx, 157), 255, 2)
+    cv2.circle(g, (270, 80), 14, 60, -1)
+    cv2.circle(g, (270, 330), 14, 60, 3)
+    cv2.rectangle(g, (480, 280), (510, 310), 60, -1)
+    f = find_marks(g, min_area=40, min_circularity=0.7,
+                   max_aspect_ratio=1.35, min_cross=25)
+    assert len(f) == 2, f
+    for u, v, _ in f:
+        assert min(abs(u - 100), abs(u - 450)) < 1.0, (u, v)
+        assert abs(v - 150) < 1.0, (u, v)
+    print("tag con cruz: OK (los disenos lisos se descartan)")
+    # Con luz desigual una marca sale mucho mas clara que la otra. Otsu se
+    # queda con la oscura; el umbral adaptativo las encuentra las dos.
+    g = np.full((400, 600), 255, np.uint8)
+    for cx, ink in ((120, 20), (480, 190)):
+        cv2.circle(g, (cx, 200), 20, ink, -1)
+        cv2.line(g, (cx - 10, 200), (cx + 10, 200), 255, 2)
+        cv2.line(g, (cx, 190), (cx, 210), 255, 2)
+    fijo = find_marks(g, min_area=40, min_circularity=0.7,
+                      max_aspect_ratio=1.35, min_cross=25)
+    adapt = find_marks(g, min_area=40, min_circularity=0.7,
+                       max_aspect_ratio=1.35, min_cross=25, adaptive=(81, 5))
+    assert len(fijo) == 1, fijo
+    assert len(adapt) == 2, adapt
+    print("luz desigual: OK (Otsu ve 1, adaptativo ve las 2)")
     # El centro del aro sale por ajuste de circulo y no por momentos. Con el aro
     # de un grosor uneven (luz que no llega igual a los dos lados), el centroide
     # se va hacia el lado con mas tinta; el ajuste solo mira como se curva el
@@ -1523,6 +1635,14 @@ def cmd_test(a):
     assert len(find_marks(g, min_area=40, min_circularity=0.55,
                           max_aspect_ratio=1.5)) == 2
     print("filtro calibracion: OK (conserva discos y descarta reflejo alargado)")
+    # una cruz impresa puede salir partida por el umbral: el cierre 3x3 une
+    # los trozos separados por un pixel, que es lo que hacia perder una marca.
+    g = np.full((80, 120), 255, np.uint8)
+    cv2.rectangle(g, (30, 30), (45, 50), 0, -1)
+    cv2.rectangle(g, (47, 30), (62, 50), 0, -1)
+    assert len(find_marks(g, min_area=100, close=0)) == 2
+    assert len(find_marks(g, min_area=100, close=3)) == 1
+    print("cierre morfologico: OK (une trozos separados por 1 px)")
     # el driver dio 1280x720 y no lo que pedimos: la ROI tiene que caber igual
     for w, h in ((1920, 1080), (1280, 720), (640, 480), (320, 240)):
         x0, y0, x1, y1 = center_roi(w, h)

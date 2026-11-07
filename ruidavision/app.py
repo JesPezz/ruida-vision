@@ -818,7 +818,8 @@ class App(tk.Tk):
         """Llevaba LARGO_MS pulsado: pasa a movimiento continuo."""
         self._jog_t = None
         self._jog_ev = threading.Event()
-        self._tarea(self._mueve, self._jog_d, self._jog_ev)
+        self._tarea(self._mueve, self._jog_d, self._jog_ev,
+                    al_terminar=lambda fu: self._soltar_panel())
 
     def _mueve(self, d, ev):
         """En el hilo de trabajo: keydown continuo y keyup al soltar."""
@@ -857,7 +858,8 @@ class App(tk.Tk):
         if self._jog_t is not None:
             self.after_cancel(self._jog_t)
             self._jog_t = None
-            self._tarea(self._paso, self._jog_d)
+            self._tarea(self._paso, self._jog_d,
+                        al_terminar=lambda fu: self._soltar_panel())
         if self._jog_ev is not None:
             self._jog_ev.set()
             self._jog_ev = None
@@ -930,7 +932,8 @@ class App(tk.Tk):
         return isinstance(self.focus_get(), (ttk.Entry, tk.Entry))
 
     def park(self):
-        self._tarea(self.maq.get().park)
+        self._tarea(self.maq.get().park,
+                    al_terminar=lambda fu: self._soltar_panel())
 
     def stop(self):
         if self._native_move_active:
@@ -955,6 +958,7 @@ class App(tk.Tk):
                 return
             pan.stop()
             self.log("PARAR: movimiento detenido; teclas del panel liberadas")
+            self._soltar_panel()
         except Exception as e:
             self.log("ERROR al parar el movimiento: %s" % e)
             messagebox.showerror("Parar movimiento",
@@ -1059,7 +1063,8 @@ class App(tk.Tk):
         if not ruida.Panel.AUTOMATIC_MOVE_ENABLED:
             self.log("Estacionar ignorado: movimiento automatico suspendido")
             return
-        self._tarea(self.maq.get().park)
+        self._tarea(self.maq.get().park,
+                    al_terminar=lambda fu: self._soltar_panel())
         self.log("estacionamiento en %s" % (self.cfg["park"],))
 
     def _congelar(self, which, n=3):
@@ -1238,6 +1243,7 @@ class App(tk.Tk):
         if not r or r[2] is None:
             self.lbl_cal.configure(text="el panel no dio posicion. Revisa la IP en "
                                        "Ajustes.", style="Mal.TLabel")
+            self._soltar_panel()
             return
         x, y, p = r
         self.puntos.append((x, y, p[0], p[1]))
@@ -1249,6 +1255,7 @@ class App(tk.Tk):
         self.lbl_cal.configure(text="Punto %d:  pixel (%.0f, %.0f) = maquina "
                                    "(%.3f, %.3f). Repite en otro sitio de la cama."
                                    % (len(self.puntos), x, y, p[0], p[1]))
+        self._soltar_panel()
 
     def cal_ajusta(self):
         if len(self.puntos) < 4:
@@ -1711,10 +1718,22 @@ class App(tk.Tk):
         try:
             pos, problema = fu.result()
         except Exception as e:
-            self._native_move_fault = True
             detalle = "ERROR al mover al punto %d: %s" % (i + 1, e)
             self.log(detalle)
             self.lbl_marcas.configure(text=detalle, style="Mal.TLabel")
+            if "ya esta en uso" in str(e):
+                self.lbl_punto.configure(text="PUNTO %d: PUERTO 40207 OCUPADO"
+                                          % (i + 1), foreground="#8b1a1a")
+                self._boton_mover()
+                self._boton_origen()
+                messagebox.showwarning(
+                    "Puerto 40207 ocupado",
+                    "Otra instancia de Ruida Vision o LightBurn tiene el puerto "
+                    "40207.\n\nCierra esa instancia y pulsa Mover %d otra vez."
+                    % (i + 1), parent=self)
+                self._soltar_panel()
+                return
+            self._native_move_fault = True
             self.lbl_punto.configure(text="PUNTO %d: MOVIMIENTO CANCELADO"
                                       % (i + 1), foreground="#8b1a1a")
             self._boton_mover()
@@ -1724,8 +1743,25 @@ class App(tk.Tk):
                 "%s\n\nEl viaje nativo no se puede cancelar desde la app. "
                 "Verifica la posicion fisica antes de volver a mover."
                 % detalle, parent=self)
+            self._soltar_panel()
             return
         self._fin_punto(i, pos, problema)
+
+    def _top_actual(self, timeout=2.0):
+        """Un fotograma NUEVO de la cenital, ya publicado por el preview."""
+        v = self.video
+        if v is None:
+            raise RuntimeError("no hay camaras conectadas: pulsa Conectar camaras")
+        n0, top, _ = v.frame()
+        limite = time.time() + timeout
+        while time.time() < limite:
+            n, top, _ = v.frame()
+            if n != n0 and top is not None:
+                return top
+            time.sleep(0.02)
+        if top is not None:
+            return top
+        raise RuntimeError("la camara cenital no da fotogramas nuevos")
 
     def _foto_cabeza(self, timeout=5.0):
         """Un fotograma NUEVO de la camara del cabezal, en gris, ya publicado
@@ -1818,10 +1854,20 @@ class App(tk.Tk):
         try:
             pos = fu.result()
         except Exception as e:
-            self._native_move_fault = True
             detalle = "ERROR al mover al origen: %s" % e
             self.log(detalle)
             self.lbl_pos.configure(text=detalle, style="Mal.TLabel")
+            if "ya esta en uso" in str(e):
+                self._boton_origen()
+                self._boton_mover()
+                messagebox.showwarning(
+                    "Puerto 40207 ocupado",
+                    "Otra instancia de Ruida Vision o LightBurn tiene el puerto "
+                    "40207.\n\nCierra esa instancia y vuelve a intentar.",
+                    parent=self)
+                self._soltar_panel()
+                return
+            self._native_move_fault = True
             self._boton_origen()
             self._boton_mover()
             messagebox.showerror(
@@ -1829,6 +1875,7 @@ class App(tk.Tk):
                 "%s\n\nEl viaje nativo no se puede cancelar desde la app. "
                 "Verifica la posicion fisica antes de volver a mover." % detalle,
                 parent=self)
+            self._soltar_panel()
             return
         self.pos, self._ok = pos, True
         self.lbl_pos.configure(text="origen confirmado: X = %.3f  Y = %.3f mm" % pos,
@@ -1836,6 +1883,7 @@ class App(tk.Tk):
         self.log("origen confirmado: %.3f, %.3f mm" % pos)
         self._boton_origen()
         self._boton_mover()
+        self._soltar_panel()
 
     def _fin_punto(self, i, pos, problema=None):
         """Ya esta el cabezal en el punto: se enseña la posicion para copiarla
@@ -1855,12 +1903,14 @@ class App(tk.Tk):
                      % (problema, i + 1))
             self._boton_mover()
             self._boton_origen()
+            self._soltar_panel()
             return
         if not _posicion_valida(pos):
             self.lbl_punto.configure(
                 text="PUNTO %d: movimiento no confirmado; mira el registro"
                      % (i + 1), foreground="#8b1a1a")
             self._boton_mover()
+            self._soltar_panel()
             return
         self.i_marca = i + 1
         self._boton_mover()
@@ -1875,12 +1925,21 @@ class App(tk.Tk):
                   "Anota el X y la Y de arriba como SEGUNDO punto y pon en LightBurn "
                   "el offset de la camara DESACTIVADO (offset = 0): el desplazamiento "
                   "ya esta calculado aqui y con offset activado se cuenta dos veces.")
+        self._soltar_panel()
 
     def _run(self, fn, ns):
         self._volvio = bool(self.video)
-        if self.video:
-            self.log("se desconectan las camaras: el calculo abre las suyas")
-        self.parar_cams()
+        top_getter = head_getter = None
+        if self.video and self.video.is_alive():
+            # El preview ya tiene las dos camaras abiertas. Reutilizarlas evita
+            # cerrarlas y volverlas a abrir en cada deteccion.
+            top_getter = self._top_actual
+            head_getter = self._foto_cabeza
+            self.log("se reutilizan las camaras del preview: no se reconectan")
+        else:
+            if self.video:
+                self.log("se desconectan las camaras: el calculo abre las suyas")
+            self.parar_cams()
         # El panel de la Ruida escucha en un puerto FIJO (40207) y el run abre el
         # suyo: dos sockets en el mismo puerto dan [WinError 10048] y el run se
         # cae sin escribir coords.txt ("sin coordenadas: mira el registro"). Se
@@ -1890,7 +1949,8 @@ class App(tk.Tk):
             self.maq.cerrar()
         self.lst.delete(0, "end")
         self.coords = []
-        self._tarea(fn, ns, al_terminar=self._fin_marcas)
+        self._tarea(fn, ns, top_getter=top_getter, head_getter=head_getter,
+                    al_terminar=self._fin_marcas)
 
     def _elige_marcas(self, found):
         """Las manchas que valen, en mm, y un aviso si no son las pedidas.
@@ -1975,7 +2035,8 @@ class App(tk.Tk):
                 self.lst.insert("end", l)
         elif not fallo:
             self.lst.insert("end", "sin coordenadas: mira el registro de abajo")
-        if self._volvio and not self.video:
+        if self._volvio and (not self.video or not self.video.is_alive()):
+            self.video = None
             self.conectar()
 
     def _copia_una(self, _):
@@ -2081,7 +2142,6 @@ class App(tk.Tk):
                             self._foto(vis[0], self._con_top(top))
                         if vis[1] is not None:
                             self._foto(vis[1], self._con_head(head))
-                    self._cada_paso()
         self.after(33, self._pintar)
 
     def _foto(self, lab, bgr):
@@ -2128,12 +2188,13 @@ class App(tk.Tk):
         cv2.circle(im, (w // 2, h // 2), 7, (0, 255, 255), 2)
         return im
 
-    def _cada_paso(self):
-        """Posicion del panel a 3 Hz, por el hilo de trabajo: el socket no se
-        toca nunca desde la UI."""
-        if self._pid is not None:
+    def _soltar_panel(self):
+        """Cede el puerto 40207 para que LightBurn pueda consultar la posicion."""
+        if self._jog_en_curso() or self._native_move_active:
             return
-        self._pid = self._tarea(self.maq.get().pos, 0.6, al_terminar=self._pos)
+        if self.maq.mq:
+            self.log("se suelta el panel del cabezal: LightBurn puede consultar")
+            self.maq.cerrar()
 
     def _pos(self, fu):
         self._pid = None

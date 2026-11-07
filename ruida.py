@@ -24,6 +24,22 @@ PORT_MOVE, SRC_MOVE = 50200, 40200
 PORT_PANEL, SRC_PANEL = 50207, 40207
 NATIVE_POSITION_MOVE_ENABLED = True
 
+
+def _udp(src):
+    """Socket UDP con un error entendible si el puerto ya esta ocupado."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.bind(("0.0.0.0", src))
+    except OSError as e:
+        s.close()
+        if getattr(e, "winerror", None) == 10048 or getattr(e, "errno", None) == 98:
+            raise RuntimeError(
+                "el puerto UDP %d ya esta en uso: cierra la otra instancia de "
+                "Ruida Vision o LightBurn y vuelve a intentar" % src) from e
+        raise
+    return s
+
+
 ACK = (0xC6, 0xCC)
 ERR = (0x46, 0xCF)
 RELTOL = 8.191
@@ -107,8 +123,7 @@ class Ruida:
     def __init__(self, ip, magic=MAGIC, src=SRC_MOVE, timeout=1.5, retries=3,
                  verbose=True):
         self.ip, self.magic, self.retries, self.verbose = ip, magic, retries, verbose
-        self.s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.s.bind(("0.0.0.0", src))
+        self.s = _udp(src)
         self.s.connect((ip, PORT_MOVE))
         self.s.settimeout(timeout)
 
@@ -216,8 +231,7 @@ class Panel:
         # RLock porque position() llama a _drain() y _frame(), que ya estan
         # dentro del mismo cerrojo.
         self._lock = threading.RLock()
-        self.s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.s.bind(("0.0.0.0", src))
+        self.s = _udp(src)
         self.s.connect((ip, PORT_PANEL))
         self.s.settimeout(0.2)
         self.release()

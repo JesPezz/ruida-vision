@@ -605,6 +605,21 @@ def main():
     chk("el run suelta el panel del cabezal antes de abrir el suyo",
         app.maq.mq is None)
 
+    # El run tiene que reutilizar las camaras que ya tiene abiertas el preview;
+    # cerrarlas y volverlas a abrir era la demora de Print and Cut.
+    app.video = VideoFalso(app.cfg, app.log)
+    vistos = []
+    def captura(ns, top_getter=None, head_getter=None):
+        vistos.append((top_getter, head_getter))
+    def tarea_directa(fn, *a, al_terminar=None, **kw):
+        return fn(*a, **kw)
+    app._tarea = tarea_directa
+    app._run(captura, app._ns(marks=1))
+    chk("el run reutiliza las camaras del preview",
+        app.video is not None and vistos
+        and callable(vistos[0][0]) and callable(vistos[0][1]))
+    app.parar_cams()
+
     # Marcas tiene que ENSENAR lo que ha visto el detector: la hoja se quedaba
     # en negro y no habia forma de saber si habia marcas o no. Se falsean las
     # rutas a un temporal: bed.png y coords.txt de verdad son de la maquina.
@@ -670,7 +685,8 @@ def main():
         pan=object(),
         goto_native=goto_falso,
         pos=lambda: fake[len(movimientos) - 1])
-    app.maq = SimpleNamespace(get=lambda: maquina_falsa)
+    app.maq = SimpleNamespace(get=lambda: maquina_falsa, mq=None,
+                              cerrar=lambda: None)
     marcas, aviso = app._elige_marcas(found)
     chk("solo se quedan las manchas dentro del area de trabajo", len(marcas) == 2)
     chk("elige los dos componentes grandes y no el reflejo lejano",
